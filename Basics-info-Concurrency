@@ -1,0 +1,9 @@
+std::thread, std::async, mutexes, locks, condition variables, atomics, memory models, and high-level abstractions for asynchronous programming.
+theoretical foundations: concurrency, parallelism, memory models.
+• Thread lifecycle, launching strategies, and ownership.
+• Safe data-sharing patterns using mutexes and locks.
+• Synchronization and communication using condition variables.
+• Asynchronous tasks using futures and promises.
+• Atomic operations and lock-free design considerations.
+• Modern C++20/C++23 enhancements.
+• Real-world design patterns for concurrency.
