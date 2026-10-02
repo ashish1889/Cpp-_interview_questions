@@ -1,0 +1,219 @@
+A data race occurs when two threads access the same memory location without synchronization. Consequences: corrupted data, crashes, undefined behavior.
+
+Using std::mutex
+std::mutex m;
+int counter = 0;
+void increment() {
+for (int i = 0; i < 100000; ++i) {
+std::lock_guard<std::mutex> lock(m);
+++counter;
+}
+}
+
+
+std::lock_guard represents a strict lexical ownership model: acquire once, release at scope exit. std::unique_lock represents a movable, stateful lock-ownership object whose 
+ownership can be transferred, released, reacquired, and used with condition variables.
+
+
+std::lock_guard:
+
+#include <mutex>
+
+std::mutex m;
+int counter = 0;
+
+void increment()
+{
+    std::lock_guard<std::mutex> lock(m);
+
+    ++counter;
+
+} // lock_guard destructor automatically unlocks m
+
+
+
+Conceptually:
+
+enter scope
+    |
+    | lock()
+    |
+    | critical section
+    |
+exit scope
+    |
+    | unlock()
+    v
+
+
+You cannot do:
+
+lock.unlock();   // ❌
+lock.lock();     // ❌
+
+The lock lifetime is tied directly to the scope.
+
+
+std::unique_lock-
+
+#include <mutex>
+
+std::mutex m;
+int counter = 0;
+
+void increment()
+{
+    std::unique_lock<std::mutex> lock(m);
+
+    ++counter;
+
+} // unlock automatically
+
+
+At first glance it looks identical.
+But unique_lock can do much more:
+
+void example()
+{
+    std::unique_lock<std::mutex> lock(m);
+
+    // Critical section
+
+    lock.unlock();
+
+    // Non-critical work
+
+    lock.lock();
+
+    // Critical section again
+}
+
+
+So its state can be:
+
+unique_lock
+    |
+    +-- owns mutex
+    |
+    +-- does not own mutex
+            |
+            +-- lock() --> owns
+
+
+
+| Feature                                                                  | `std::lock_guard` | `std::unique_lock` |
+|---                                                                       |      ---          |                 ---|
+| RAII                                                                     | Yes               | Yes                |
+| Automatically unlocks                                                    | Yes               | Yes                |
+| `lock()` manually                                                        | No                | Yes                |
+| `unlock()` manually                                                      | No                | Yes                |
+| Can defer locking                                                        | No                | Yes                |
+| Can try-lock                                                             | No                | Yes                |
+| Can transfer ownership                                                   | No                | Yes                |
+| Works with `condition_variable`                                          | No                | **Yes**            |
+| Movable                                                                  | No                | **Yes**            |
+| Copyable                                                                 | No                | No                 |
+| Complexity                                                               | Lower             | Higher             |
+| Typical overhead                                                         | Minimal           | Slightly more state/logic |
+| Best use                                                                 | Simple critical section | Complex lock lifetime |
+
+
+
+Why unique_lock is necessary for condition_variable-
+
+Consider a producer-consumer queue.
+
+#include <condition_variable>
+#include <mutex>
+#include <queue>
+
+std::mutex m;
+std::condition_variable cv;
+std::queue<int> q;
+
+void consumer()
+{
+    std::unique_lock<std::mutex> lock(m);
+
+    cv.wait(lock, [] {
+        return !q.empty();
+    });
+
+    int value = q.front();
+    q.pop();
+}
+
+The interesting part is:
+
+cv.wait(lock, ...);
+
+condition_variable::wait() needs to:
+1. Atomically release the mutex.
+2. Put the thread to sleep.
+3. Wake the thread.
+4. Reacquire the mutex.
+5. Return to the caller.
+
+
+Conceptually:
+
+                mutex locked
+                     |
+                     v
+              +-------------+
+              | check queue  |
+              +-------------+
+                     |
+                  empty?
+                     |
+                    YES
+                     |
+                     v
+             unlock mutex
+                     |
+                     v
+                   sleep
+                     |
+                notification
+                     |
+                     v
+             wake up thread
+                     |
+                     v
+              lock mutex again
+                     |
+                     v
+              check predicate
+                     |
+                    YES
+                     |
+                     v
+             consume element
+
+unique_lock provides the ownership semantics required for this.
+
+
+Why can't we simply use lock_guard?
+
+This won't work:
+
+void consumer()
+{
+    std::lock_guard<std::mutex> lock(m);
+
+    cv.wait(lock, [] {
+        return !q.empty();
+    });
+}
+
+Because condition_variable::wait() requires a std::unique_lock<std::mutex>.
+The fundamental reason is that wait() must be able to manipulate the mutex ownership.
+lock_guard essentially says:
+“I acquired this mutex at construction and I will hold it until destruction.”
+
+unique_lock says:
+“I currently own this mutex, but my ownership can temporarily be released and later reacquired.”
+
+That's the deeper distinction.
+
+
