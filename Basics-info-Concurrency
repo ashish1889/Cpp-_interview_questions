@@ -7,3 +7,50 @@ theoretical foundations: concurrency, parallelism, memory models.
 • Atomic operations and lock-free design considerations.
 • Modern C++20/C++23 enhancements.
 • Real-world design patterns for concurrency.
+
+• Concurrency: Multiple tasks overlap in time. Not necessarily running simultaneously.
+• Parallelism: Tasks truly execute at the same time on different cores.
+Concurrency = structure; parallelism = execution.
+
+C++ relies on a native OS threading model:
+• Windows: Win32 threads
+• Linux/Unix: POSIX threads (pthreads)
+• macOS/iOS: pthreads + Grand Central Dispatch abstractions
+std::thread provides a uniform abstraction layer on top of these.
+
+
+Creating Threads
+#include <iostream>
+#include <thread>
+void work(int id) {
+std::cout << ”Thread ” << id << ” running\n”;
+}
+int main() {
+std::thread t1(work, 1);
+std::thread t2(work, 2);
+t1.join();
+t2.join();
+}
+
+
+A C++ thread can be:
+• Not started: not yet constructed.
+• Running: actively executing.
+• Joinable: finished execution but waiting for join().
+• Detached: runs independently, inaccessible to the program.
+
+std::thread is a move-only type.
+
+Best practice:
+std::thread t(work);
+if (t.joinable())
+t.join();
+
+Launching Strategies
+• Launch threads immediately.
+• Use a thread pool (dedicated worker threads).
+• Use asynchronous tasks (std::async).
+
+
+Research how many hardware threads your machine has using-> std::cout << std::thread::hardware_concurrency();
+
