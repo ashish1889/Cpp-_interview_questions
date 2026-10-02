@@ -1,1 +1,136 @@
+Classic Staff-level producer/consumer example
 
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
+#include <queue>
+#include <thread>
+
+class Queue
+{
+public:
+    void push(int value)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            queue_.push(value);
+        }
+
+        cv_.notify_one();
+    }
+
+    int pop()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+
+        cv_.wait(lock, [this] {
+            return !queue_.empty();
+        });
+
+        int value = queue_.front();
+        queue_.pop();
+
+        return value;
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::queue<int> queue_;
+};
+
+
+
+Producer:
+
+std::lock_guard<std::mutex> lock(mutex_);
+
+Why?
+It only needs:
+
+lock
+  ↓
+modify queue
+  ↓
+unlock
+
+No special ownership manipulation.
+
+Consumer:
+
+std::unique_lock<std::mutex> lock(mutex_);
+cv_.wait(lock, ...);
+
+Why?
+Because wait() needs to:
+
+unlock → sleep → wake → relock
+
+
+Interviewer's likely follow-up questions:
+
+Q1. Why can't lock_guard be used with condition_variable::wait()?
+Because wait() needs a lock object whose ownership can be released while waiting and reacquired after wakeup. lock_guard doesn't provide that interface.
+
+Q2. Can unique_lock be copied?
+No.
+std::unique_lock<std::mutex> a(m);
+
+// std::unique_lock<std::mutex> b = a; // ❌
+
+But it can be moved:
+
+auto b = std::move(a); // ✅
+
+Q3. What happens to a after std::move(a)?
+a remains a valid unique_lock object but no longer owns the mutex.
+
+a.owns_lock() == false
+
+while b owns it.
+
+Q4. What does defer_lock do?
+std::unique_lock<std::mutex> lock(m, std::defer_lock);
+
+Constructs the lock object without acquiring the mutex.
+Later:
+lock.lock();
+can acquire it.
+
+Q5. What does try_to_lock do?
+std::unique_lock<std::mutex> lock(m, std::try_to_lock);
+
+Attempts to acquire without blocking.
+Check:
+lock.owns_lock();
+
+Q6. Why use std::scoped_lock instead of std::lock_guard?
+For multiple mutexes:
+
+std::scoped_lock lock(m1, m2);
+
+It provides RAII while safely locking multiple mutexes.
+
+
+Q7. What happens if two threads acquire two mutexes in opposite order?
+Potential deadlock:
+T1: lock(A) → lock(B)
+
+T2: lock(B) → lock(A)
+
+Use consistent lock ordering or:
+
+std::scoped_lock lock(A, B);
+
+or the equivalent std::lock + deferred unique_lock approach.
+
+
+
+"What's the difference between lock_guard and unique_lock?"
+
+"lock_guard is a simple RAII wrapper with fixed ownership semantics: it acquires the mutex during construction and releases it during destruction. 
+It's ideal when the entire scope should be protected.
+unique_lock is a more flexible ownership object. It can defer acquisition, try to acquire, explicitly unlock and relock, report ownership, and transfer 
+ownership through move semantics. Most importantly, condition_variable::wait() requires a unique_lock because waiting involves atomically releasing the mutex and 
+reacquiring it after wakeup.
+So I use lock_guard when I need a simple lexical critical section, and unique_lock when the lock lifetime or ownership needs to be manipulated. In C++17, for locking multiple mutexes without needing manual ownership manipulation, I'd also consider scoped_lock."
