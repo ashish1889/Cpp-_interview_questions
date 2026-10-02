@@ -217,3 +217,248 @@ unique_lock says:
 That's the deeper distinction.
 
 
+defer_lock-
+Another important unique_lock feature:
+
+std::unique_lock<std::mutex> lock(m, std::defer_lock);
+
+// mutex is NOT locked yet
+
+// do something...
+
+lock.lock();
+
+// critical section
+
+lock.unlock();
+
+With unique_lock:
+
+std::unique_lock<std::mutex> lock(m, std::defer_lock);
+// mutex NOT locked
+This becomes particularly useful when acquiring multiple mutexes.
+
+
+Staff-level example: avoiding deadlock with multiple mutexes
+Suppose:
+
+std::mutex accountA;
+std::mutex accountB;
+
+Naive implementation:
+
+void transfer()
+{
+    std::lock_guard<std::mutex> lockA(accountA);
+    std::lock_guard<std::mutex> lockB(accountB);
+
+    // transfer
+}
+
+Another thread might do:
+
+void reverseTransfer()
+{
+    std::lock_guard<std::mutex> lockB(accountB);
+    std::lock_guard<std::mutex> lockA(accountA);
+
+    // transfer
+}
+
+You can get:
+
+Thread 1                    Thread 2
+
+lock(A)                     lock(B)
+   |                           |
+   |                           |
+wait for B                wait for A
+   |                           |
+   +---------- DEADLOCK -------+
+
+
+A better approach is:
+
+void transfer()
+{
+    std::unique_lock<std::mutex> lockA(accountA, std::defer_lock);
+    std::unique_lock<std::mutex> lockB(accountB, std::defer_lock);
+
+    std::lock(lockA, lockB);
+
+    // Both mutexes locked safely
+}
+
+Or, when you don't need unique_lock afterward:
+
+void transfer()
+{
+    std::scoped_lock lock(accountA, accountB);
+
+    // Both locked
+}
+
+“Why use unique_lock here instead of lock_guard?”
+
+“I need deferred ownership so I can acquire multiple mutexes using std::lock, which provides deadlock-avoidance semantics. If I only need simple simultaneous locking and no later 
+ownership manipulation, std::scoped_lock is a cleaner C++17 choice.”
+
+try_lock-
+
+unique_lock can also avoid blocking:
+
+std::unique_lock<std::mutex> lock(m, std::try_to_lock);
+
+if (lock.owns_lock()) {
+    // Successfully acquired mutex
+    do_work();
+} else {
+    // Mutex was already held
+    handle_busy_case();
+}
+
+This is useful when blocking isn't acceptable.
+
+Thread A
+   |
+   | owns mutex
+   |
+   v
+
+Thread B
+   |
+   | try_lock
+   |
+   +----> fails
+           |
+           v
+      do something else
+
+
+Ownership transfer
+This is another major difference.
+unique_lock is movable.
+
+std::unique_lock<std::mutex> acquireLock()
+{
+    std::unique_lock<std::mutex> lock(m);
+    return lock;
+}
+
+
+The ownership can be transferred:
+
+std::unique_lock<std::mutex> lock1(m);
+
+std::unique_lock<std::mutex> lock2 = std::move(lock1);
+
+After this:
+
+lock1
+  |
+  | moved-from
+  v
+doesn't own mutex
+
+
+lock2
+  |
+  v
+owns mutex
+
+This is conceptually similar to std::unique_ptr:
+There can be only one active owner of the lock object.
+
+That's where the name unique_lock comes from.
+
+
+owns_lock()
+Because unique_lock can exist without owning a mutex, it has state:
+
+std::unique_lock<std::mutex> lock(m, std::defer_lock);
+
+if (!lock.owns_lock()) {
+    lock.lock();
+}
+
+if (lock.owns_lock()) {
+    // mutex is currently owned
+}
+
+This is another fundamental difference.
+A lock_guard has no useful “not currently owning the lock” state.
+
+Early unlock
+This is a common real-world reason to use unique_lock.
+Suppose you have:
+
+void process()
+{
+    std::unique_lock<std::mutex> lock(m);
+
+    update_shared_state();
+
+    lock.unlock();
+
+    expensive_operation();
+
+}
+
+
+You don't want to hold the mutex while doing:
+
+expensive_operation();
+
+This is important because holding locks for longer than necessary can cause:
+- contention
+- thread starvation
+- lower throughput
+- priority inversion
+- increased latency
+
+
+
+lock_guard vs unique_lock vs scoped_lock
+
+                    Mutex ownership
+                         |
+          +--------------+--------------+
+          |                             |
+     Simple scope                Flexible ownership
+          |                             |
+    lock_guard                    unique_lock
+          |
+    C++17 multiple
+       mutexes
+          |
+    scoped_lock
+
+
+Simple critical section-
+
+std::lock_guard<std::mutex> lock(m);
+
+Flexible lock management-
+
+std::unique_lock<std::mutex> lock(m);
+
+lock.unlock();
+...
+lock.lock();
+
+Multiple mutexes-
+
+std::scoped_lock lock(m1, m2, m3);
+
+Which one is faster?
+
+lock_guard generally has the simpler implementation because it only needs to acquire in construction and release in destruction. 
+unique_lock maintains additional ownership state and supports deferred locking, manual unlock/relock, try-locking, and ownership transfer. 
+Therefore, when those capabilities aren't needed, lock_guard communicates intent more precisely and may have less overhead. But I wouldn't choose 
+between them based solely on microbenchmark performance—the synchronization strategy and contention dominate in most real systems.
+
+
+
+
+
+
