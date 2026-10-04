@@ -1,0 +1,257 @@
+What is std::scoped_lock?
+std::scoped_lock is a C++17 RAII locking utility that can lock one or multiple mutexes simultaneously.
+
+#include <mutex>
+
+std::mutex m1;
+std::mutex m2;
+
+void foo()
+{
+    std::scoped_lock lock(m1, m2);
+
+    // Both m1 and m2 are locked here.
+
+    // Critical section
+} // m2 and m1 are automatically unlocked
+
+The key advantage is:
+When locking multiple mutexes, std::scoped_lock uses a deadlock-avoidance algorithm so that competing threads don't deadlock simply because they acquire mutexes in different orders.
+
+Why do we need it?
+Consider a bank-transfer example.
+We have two accounts:
+
+struct Account {
+    int balance;
+    std::mutex m;
+};
+
+
+Suppose we transfer money:
+
+void transfer(Account& from, Account& to, int amount)
+{
+    std::lock_guard<std::mutex> lock1(from.m);
+    std::lock_guard<std::mutex> lock2(to.m);
+
+    from.balance -= amount;
+    to.balance += amount;
+}
+
+Looks reasonable.
+But imagine two threads:
+Thread 1
+transfer(A, B, 100);
+
+It does:
+lock(A)
+lock(B)
+
+Thread 2
+transfer(B, A, 50);
+
+It does:
+
+lock(B)
+lock(A)
+
+Possible execution:
+
+Thread 1                  Thread 2
+--------                  --------
+lock(A)
+                          lock(B)
+
+wait for B                wait for A
+
+       DEADLOCK
+
+Neither thread can proceed.
+This is the classic circular wait condition.
+
+std::scoped_lock solves this
+Instead:
+
+void transfer(Account& from, Account& to, int amount)
+{
+    std::scoped_lock lock(from.m, to.m);
+
+    from.balance -= amount;
+    to.balance += amount;
+}
+
+Now C++ handles the acquisition of both mutexes in a deadlock-avoiding manner.
+Even if we have:
+
+transfer(A, B, 100);
+
+and:
+
+transfer(B, A, 50);
+
+both calls use:
+std::scoped_lock lock(...);
+
+The library ensures that the mutexes are acquired without the simple lock-order deadlock described above.
+
+What happens internally?
+std::scoped_lock lock(m1, m2);
+
+as being based on:
+std::lock(m1, m2);
+
+followed by RAII ownership.
+
+Conceptually:
+
+std::lock(m1, m2);
+
+// Now both are locked
+
+// scoped_lock remembers them
+
+// destructor:
+// unlock(m1)
+// unlock(m2)
+
+The important distinction is that std::lock() performs the deadlock-avoiding acquisition, while std::scoped_lock provides the RAII lifetime management.
+You should not describe the implementation as literally being equivalent in every detail—the standard specifies behavior, not a particular implementation.
+
+Staff-level example: thread-safe bank transfer
+A good interview example is:
+
+#include <iostream>
+#include <mutex>
+#include <thread>
+
+class Account {
+public:
+    explicit Account(int balance)
+        : balance_(balance) {}
+
+    int balance() const {
+        return balance_;
+    }
+
+private:
+    friend void transfer(Account&, Account&, int);
+
+    int balance_;
+    std::mutex mutex_;
+};
+
+void transfer(Account& from, Account& to, int amount)
+{
+    std::scoped_lock lock(from.mutex_, to.mutex_);
+
+    if (from.balance_ < amount)
+        return;
+
+    from.balance_ -= amount;
+    to.balance_ += amount;
+}
+
+int main()
+{
+    Account A(1000);
+    Account B(1000);
+
+    std::thread t1([&] {
+        transfer(A, B, 100);
+    });
+
+    std::thread t2([&] {
+        transfer(B, A, 200);
+    });
+
+    t1.join();
+    t2.join();
+
+    std::cout << A.balance() << '\n';
+    std::cout << B.balance() << '\n';
+}
+
+Why this is a strong interview example
+You can explain:
+“The transfer operation needs to modify two independent objects atomically with respect to other transfers. Therefore I need to hold both mutexes simultaneously.
+Acquiring them independently using two lock_guards can create lock-order inversion. scoped_lock allows me to acquire multiple mutexes using deadlock-avoidance and gives me RAII cleanup.”
+
+scoped_lock vs lock_guard
+This is a very common interview question.
+
+| Feature |                                                             `lock_guard` |                                                        `scoped_lock` |
+|---|---|---|
+| Introduced                                                                 | C++11 |                                                          C++17 |
+| RAII                                                                       | Yes |                                                             Yes |
+| One mutex                                                                  | Yes |                                                             Yes |
+| Multiple mutexes                                                           | No |                                                              **Yes** |
+| Deadlock-safe multi-locking                                                | No |                                                               **Yes** |
+| Unlock manually                                                            | No |                                                                 No |
+| Moveable                                                                   | No |                                                                 No |
+| `try_lock` support                                                         | No |                                                                 No |
+| Typical use                                                                | Simple single mutex |                                           Multiple mutexes |
+
+
+For multiple mutexes:
+std::scoped_lock lock(m1, m2, m3);
+is the natural C++17 solution.
+
+Another subtle point: don't use adopt_lock unnecessarily
+You may encounter:
+std::mutex m1;
+std::mutex m2;
+
+std::lock(m1, m2);
+
+std::lock_guard<std::mutex> l1(m1, std::adopt_lock);
+std::lock_guard<std::mutex> l2(m2, std::adopt_lock);
+
+This is older-style C++.
+The idea is:
+
+std::lock(m1, m2);
+
+acquires both mutexes.
+Then:
+std::adopt_lock
+
+tells lock_guard:
+"The mutex is already locked. Take ownership of it."
+
+C++17 gives us the much cleaner:
+std::scoped_lock lock(m1, m2);
+
+What about the same mutex twice?
+Don't do:
+
+std::scoped_lock lock(m, m);
+
+For a normal non-recursive std::mutex, attempting to lock the same mutex multiple times is not a valid use of the API and can result 
+in undefined behavior/deadlock depending on the locking operation and mutex type.
+At Staff level, mention:
+
+“The mutex arguments should represent distinct mutex objects unless the mutex type and operation explicitly support recursive locking semantics.”
+
+
+                 Mutex ownership
+                       │
+          ┌────────────┼────────────┐
+          │            │            │
+     lock_guard   scoped_lock   unique_lock
+          │            │            │
+       Simple       Multiple      Flexible
+       RAII          mutexes       control
+          │            │            │
+       m only       m1,m2,m3     lock/unlock
+                                   wait()
+                                   defer
+                                   try_lock
+
+
+The key interview insight is:
+lock_guard = simple RAII ownership
+scoped_lock = RAII + deadlock-safe acquisition of multiple mutexes
+unique_lock = flexible/dynamic lock ownership
+
+
