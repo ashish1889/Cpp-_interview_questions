@@ -1,0 +1,150 @@
+What is std::shared_mutex?
+std::shared_mutex was introduced in C++17. It supports two locking modes:
+- Shared/read lock — multiple threads may hold it simultaneously.
+- Exclusive/write lock — exactly one thread may hold it, and no readers can hold it simultaneously.
+Conceptually:
+
+                std::shared_mutex
+
+        ┌────────────────────────────┐
+        │                            │
+Readers │ R1   R2   R3   R4   ...   │  ← Allowed concurrently
+        │                            │
+        └────────────────────────────┘
+
+                    OR
+
+        ┌────────────────────────────┐
+Writer  │             W1             │  ← Exclusive
+        └────────────────────────────┘
+
+This makes it useful for read-heavy shared state.
+
+Basic example
+Imagine a cache that is read very frequently but updated occasionally.
+
+#include <iostream>
+#include <shared_mutex>
+#include <unordered_map>
+#include <string>
+
+class Cache {
+private:
+    std::unordered_map<int, std::string> cache_;
+    mutable std::shared_mutex mutex_;
+
+public:
+    std::string get(int key) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        auto it = cache_.find(key);
+
+        if (it != cache_.end())
+            return it->second;
+
+        return "";
+    }
+
+    void put(int key, std::string value) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        cache_[key] = std::move(value);
+    }
+};
+
+The important distinction is:
+
+std::shared_lock<std::shared_mutex>
+
+for readers versus
+
+std::unique_lock<std::shared_mutex>
+
+for writers.
+If threads execute:
+
+T1 → get()
+T2 → get()
+T3 → get()
+T4 → get()
+
+they can execute concurrently:
+
+Time ───────────────────────────────>
+
+T1  [------ READ ------]
+T2     [------ READ ------]
+T3        [------ READ ------]
+T4          [------ READ ------]
+
+But suppose a writer arrives:
+
+T1  [---- READ ----]
+T2  [------- READ -------]
+
+T3                    [--- WRITE ---]
+
+T4                                    [--- READ ---]
+
+The writer must wait until existing readers release their shared locks. While the writer holds the exclusive lock, readers cannot acquire a shared lock.
+
+Why not just use std::mutex?
+You absolutely can.
+std::mutex mutex_;
+
+std::string get(int key)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cache_[key];
+}
+
+But every reader becomes serialized:
+
+std::mutex
+
+Reader 1    [READ]
+Reader 2          [READ]
+Reader 3                [READ]
+Reader 4                      [READ]
+
+Even though none of those operations modifies the data.
+With shared_mutex:
+
+Reader 1    [--------- READ ---------]
+Reader 2      [--------- READ ---------]
+Reader 3        [--------- READ ---------]
+Reader 4          [--------- READ ---------]
+
+
+So the potential gain comes from reader concurrency.
+
+The three APIs you should know
+A shared_mutex itself exposes:
+
+mutex.lock();
+mutex.unlock();
+
+mutex.lock_shared();
+mutex.unlock_shared();
+
+Normally, don't manually call these.
+Use RAII.
+For exclusive access:
+
+std::unique_lock<std::shared_mutex> lock(mutex);
+
+For shared access:
+
+std::shared_lock<std::shared_mutex> lock(mutex);
+
+What is std::shared_mutex, and when would you use it?
+
+std::shared_mutex is a C++17 reader-writer synchronization primitive supporting shared and exclusive ownership. Multiple threads can simultaneously acquire shared ownership, 
+typically through std::shared_lock, while a writer acquires exclusive ownership, typically through std::unique_lock.
+I'd consider it for read-heavy shared structures such as caches or configuration stores where serialization caused by a regular mutex is measurably limiting throughput.
+I wouldn't assume it's automatically faster than std::mutex, because reader-writer locks have additional synchronization overhead and their benefit depends on contention, 
+critical-section duration and the read/write ratio.
+I'd also consider writer latency and fairness, avoid unsafe read-to-write upgrade assumptions, and revalidate state if I release a shared lock before obtaining exclusive ownership.
+At larger scale, I'd question whether one shared mutex is itself the bottleneck and consider sharding, immutable snapshots, atomics, or other synchronization strategies
+depending on the access pattern.
+
