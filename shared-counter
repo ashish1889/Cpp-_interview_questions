@@ -1,0 +1,158 @@
+Shared counter using std::mutex is a classic C++ multithreading interview problem. The key idea is: protect every access to the shared counter with the same mutex.
+
+#include <iostream>
+#include <thread>
+#include <mutex>
+#include <vector>
+
+class Counter {
+private:
+    int count_ = 0;
+    std::mutex mutex_;
+
+public:
+    void increment() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++count_;
+    }
+
+    int get() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return count_;
+    }
+};
+
+void worker(Counter& counter, int iterations) {
+    for (int i = 0; i < iterations; ++i) {
+        counter.increment();
+    }
+}
+
+int main() {
+    Counter counter;
+
+    constexpr int numThreads = 10;
+    constexpr int iterations = 100000;
+
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < numThreads; ++i) {
+        threads.emplace_back(worker,
+                             std::ref(counter),
+                             iterations);
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    std::cout << "Final count = " << counter.get() << '\n';
+
+    return 0;
+}
+
+Expected output-
+
+Final count = 1000000
+
+Because:
+
+10 threads × 100,000 increments = 1,000,000
+
+Why do we need the mutex?
+This:
+
+++count_;
+
+looks like one operation, but conceptually it involves:
+1. Read count_
+2. Add 1
+3. Write count_
+
+Without synchronization, two threads can do:
+Thread 1                  Thread 2
+--------                  --------
+read count = 10
+                          read count = 10
+write 11
+                          write 11
+
+The expected result was 12, but we get 11. This is a data race and therefore undefined behavior in C++.
+
+With:
+
+std::lock_guard<std::mutex> lock(mutex_);
+only one thread can execute the critical section at a time.
+
+Why lock_guard?
+This is an excellent staff-level interview point.
+std::lock_guard<std::mutex> lock(mutex_);
+uses RAII:
+constructor → locks mutex
+scope       → critical section
+destructor  → unlocks mutex
+
+So even if an exception occurs, the mutex is automatically released.
+You could technically write:
+mutex_.lock();
+++count_;
+mutex_.unlock();
+
+but this is dangerous because an early return or exception can leave the mutex locked.
+
+Important interview consideration
+If get() is called concurrently with increment(), it must also be synchronized:
+
+int get() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return count_;
+}
+
+A common mistake is to protect writes but not reads:
+
+void increment() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++count_;
+}
+
+int get() {
+    return count_;       // ❌ data race if increment() is running
+}
+
+For a staff-level interview, you should explicitly mention:
+Every access to shared mutable state must obey the same synchronization protocol.
+
+Alternative: direct shared counter
+For a simpler interview answer:
+
+#include <iostream>
+#include <thread>
+#include <mutex>
+#include <vector>
+
+int counter = 0;
+std::mutex m;
+
+void incrementCounter(int n) {
+    for (int i = 0; i < n; ++i) {
+        std::lock_guard<std::mutex> lock(m);
+        ++counter;
+    }
+}
+
+int main() {
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < 10; ++i) {
+        threads.emplace_back(incrementCounter, 100000);
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    std::cout << counter << '\n';
+}
+
+The class-based version is preferable in a staff-level interview because it encapsulates the shared state and its synchronization, preventing 
+callers from accidentally accessing count_ without the mutex.
