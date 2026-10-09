@@ -1,4 +1,5 @@
-In C++, try_lock() and owns_lock() are commonly used with std::unique_lock to perform non-blocking mutex acquisition and to check whether the lock was successfully acquired.
+In C++, try_lock() and owns_lock() are commonly used with std::unique_lock to perform non-blocking mutex acquisition and
+to check whether the lock was successfully acquired.
 
 1. try_lock()
 
@@ -147,10 +148,11 @@ Logging/statistics paths
 where waiting on a mutex could hurt responsiveness.
 
 Difference between lock(), try_lock(), and owns_lock()
-Function	          Blocks?	                 Return Value	                    Purpose      
-lock()	               Yes	                  void	                          Wait until mutex is acquired
-try_lock()	            No	                  bool	                          Attempt lock once
-owns_lock()	            No	                  bool	                         Check whether unique_lock currently owns mutex
+Function	          Blocks?	             Return Value	                  Purpose      
+lock()	               Yes	                  void	                           Wait until mutex is acquired
+try_lock()	            No	                  bool	                           Attempt lock once
+owns_lock()	            No	                  bool	                           Check whether unique_lock 
+                                                                               currently owns mutex
 Typical Flow
 std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
 
