@@ -1,0 +1,169 @@
+In C++, try_lock() and owns_lock() are commonly used with std::unique_lock to perform non-blocking mutex acquisition and to check whether the lock was successfully acquired.
+
+1. try_lock()
+
+try_lock() attempts to acquire the mutex without blocking.
+
+Returns true if the mutex was successfully locked.
+Returns false if another thread already owns the mutex.
+Unlike lock(), it does not wait for the mutex to become available.
+Example
+#include <iostream>
+#include <mutex>
+
+std::mutex mtx;
+
+int main() {
+    std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+
+    if (lock.try_lock()) {
+        std::cout << "Lock acquired\n";
+        // Critical section
+    } else {
+        std::cout << "Failed to acquire lock\n";
+    }
+
+    return 0;
+}
+
+What happens?
+std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+
+Creates a unique_lock.
+Does not lock the mutex yet because of std::defer_lock.
+lock.try_lock();
+
+Attempts to lock the mutex immediately.
+Returns true or false.
+2. owns_lock()
+
+owns_lock() checks whether the unique_lock currently owns the mutex.
+
+Returns true if lock acquisition succeeded.
+Returns false otherwise.
+Example
+#include <iostream>
+#include <mutex>
+
+std::mutex mtx;
+
+int main() {
+    std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
+
+    if (lock.owns_lock()) {
+        std::cout << "I own the mutex\n";
+    } else {
+        std::cout << "Mutex is busy\n";
+    }
+
+    return 0;
+}
+
+Real-world Example (Two Threads)
+#include <iostream>
+#include <thread>
+#include <mutex>
+#include <chrono>
+
+std::mutex mtx;
+
+void worker1()
+{
+    std::lock_guard<std::mutex> lg(mtx);
+
+    std::cout << "Thread1 acquired lock\n";
+
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+}
+
+void worker2()
+{
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    std::unique_lock<std::mutex> ul(mtx, std::defer_lock);
+
+    if (ul.try_lock()) {
+        std::cout << "Thread2 got lock\n";
+    } else {
+        std::cout << "Thread2 failed to get lock\n";
+    }
+
+    std::cout << "owns_lock = "
+              << std::boolalpha
+              << ul.owns_lock()
+              << std::endl;
+}
+
+int main()
+{
+    std::thread t1(worker1);
+    std::thread t2(worker2);
+
+    t1.join();
+    t2.join();
+}
+
+Output
+Thread1 acquired lock
+Thread2 failed to get lock
+owns_lock = false
+
+Why?
+
+Timeline:
+
+T1 ---- lock mutex ---------- sleep(5s) -------- unlock
+
+T2       try_lock()
+         |
+         +--> mutex busy
+               return false
+
+
+Since Thread1 already owns the mutex, try_lock() in Thread2 fails immediately and owns_lock() returns false.
+
+Common AAOS / Android Pattern
+
+When you don't want a Binder thread or UI thread to block:
+
+std::unique_lock<std::mutex> lock(mMutex, std::try_to_lock);
+
+if (!lock.owns_lock()) {
+    ALOGW("Resource busy");
+    return;
+}
+
+// Safe access to shared data
+processData();
+
+
+This pattern is frequently used for:
+
+Vehicle HAL callbacks
+Binder services
+UI event handling
+Logging/statistics paths
+
+where waiting on a mutex could hurt responsiveness.
+
+Difference between lock(), try_lock(), and owns_lock()
+Function	          Blocks?	                 Return Value	                    Purpose      
+lock()	               Yes	                  void	                          Wait until mutex is acquired
+try_lock()	            No	                  bool	                          Attempt lock once
+owns_lock()	            No	                  bool	                         Check whether unique_lock currently owns mutex
+Typical Flow
+std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+
+if (lock.try_lock()) {
+    // acquired
+}
+
+if (lock.owns_lock()) {
+    // safe to use shared resource
+}
+
+
+Think of it as:
+
+try_lock()  -> Attempt to get the key
+owns_lock() -> Check whether you actually got the key
