@@ -1,0 +1,105 @@
+Here's a simple thread-safe shared counter implementation using std::mutex 
+and std::unique_lock with std::defer_lock:
+
+#include <iostream>
+#include <thread>
+#include <mutex>
+#include <vector>
+
+class SharedCounter {
+private:
+    int counter{0};
+    std::mutex mtx;
+
+public:
+    void increment() {
+        std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+
+        // Lock explicitly later
+        lock.lock();
+
+        ++counter;
+
+        // lock.unlock(); // optional, unlocks automatically when lock goes out of scope
+    }
+
+    int getValue() {
+        std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+        lock.lock();
+
+        return counter;
+    }
+};
+
+void worker(SharedCounter& counter, int iterations) {
+    for (int i = 0; i < iterations; ++i) {
+        counter.increment();
+    }
+}
+
+int main() {
+    SharedCounter counter;
+
+    const int numThreads = 5;
+    const int incrementsPerThread = 10000;
+
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < numThreads; ++i) {
+        threads.emplace_back(worker,
+                             std::ref(counter),
+                             incrementsPerThread);
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    std::cout << "Final Counter Value: "
+              << counter.getValue() << std::endl;
+
+    return 0;
+}
+
+Why std::defer_lock?
+
+Normally:
+
+std::unique_lock<std::mutex> lock(mtx);
+
+
+locks the mutex immediately.
+
+With:
+
+std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+
+
+the lock object is created without acquiring the mutex. You decide later when to lock:
+
+lock.lock();
+
+
+This is useful when:
+
+Locking multiple mutexes safely.
+Performing some work before acquiring the lock.
+Conditionally acquiring a lock.
+
+Example:
+
+std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+
+// some non-critical work
+
+lock.lock();
+// critical section
+++counter;
+
+
+Expected output:
+
+Final Counter Value: 50000
+
+
+(5 threads × 10000 increments each).
