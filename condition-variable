@@ -1,0 +1,94 @@
+Condition Variables: Theory
+A condition variable allows:
+• A thread to go to sleep while waiting for a condition.
+• Another thread to wake up sleeping threads by notifying them.
+It is always used with a mutex and a predicate.
+
+Key operations
+• wait(lock) Releases the lock, sleeps, reacquires the lock before returning.
+• wait(lock, predicate) Wakes only when predicate is true (prevents spurious wakeups).
+• notify_one()
+• notify_all()
+
+
+
+Producer - consumer problem using Condition variable-
+
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
+#include <queue>
+#include <thread>
+
+std::mutex m;
+std::condition_variable cv;
+std::queue<int> q;
+bool finished = false;
+
+void producer()
+{
+    for (int i = 0; i < 10; ++i)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m);
+            q.push(i);
+        }
+
+        cv.notify_one();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m);
+        finished = true;
+    }
+
+    cv.notify_all();
+}
+
+void consumer()
+{
+    std::unique_lock<std::mutex> lock(m);
+
+    while (true)
+    {
+        cv.wait(lock, [] {
+            return !q.empty() || finished;
+        });
+
+        if (!q.empty())
+        {
+            int item = q.front();
+            q.pop();
+
+            lock.unlock();
+
+            std::cout << "Consumed " << item << "\n";
+
+            lock.lock();
+        }
+        else if (finished)
+        {
+            break;
+        }
+    }
+}
+
+int main()
+{
+    std::thread t1(producer);
+    std::thread t2(consumer);
+
+    t1.join();
+    t2.join();
+
+    return 0;
+}
+
+
+
+Why We Need a Predicate
+Spurious wakeups happen: a thread may wake even without a notification. This is legal
+and expected by the C++ standard.
+Thus always use:
+cv.wait(lock, [] { return condition; });
+
