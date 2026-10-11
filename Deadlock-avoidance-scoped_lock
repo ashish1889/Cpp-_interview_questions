@@ -1,0 +1,162 @@
+In C++, a deadlock occurs when two or more threads wait indefinitely for resources held by each other. With two mutexes, 
+a common cause is acquiring the same mutexes in opposite orders.
+
+For a staff-level MAANG interview, understand both how to reproduce the deadlock and why `std::scoped_lock` fixes it.
+
+## 1. Demonstrate a deadlock with two mutexes
+
+Consider two mutexes, `m1` and `m2`, shared by two threads.
+
+- Thread 1 locks `m1` and then tries to lock `m2`.
+- Thread 2 locks `m2` and then tries to lock `m1`.
+
+### Deadlock sequence
+
+#### Thread 1
+
+`lock(m1)`
+
+`wait for m2`
+
+#### Thread 2
+
+`lock(m2)`
+
+`wait for m1`
+
+Thread 1 holds m1 while waiting for m2; Thread 2 holds m2 while waiting for m1. Neither can proceed.
+
+### Deadlocking code
+
+```
+
+#include <iostream>
+#include <mutex>
+#include <thread>
+
+std::mutex m1;
+std::mutex m2;
+
+void thread1() {
+    std::lock_guard<std::mutex> lock1(m1);
+    std::cout << "Thread 1 acquired m1\n";
+
+    // Thread 1 may pause here while holding m1.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::lock_guard<std::mutex> lock2(m2);
+    std::cout << "Thread 1 acquired m2\n";
+}
+
+void thread2() {
+    std::lock_guard<std::mutex> lock1(m2);
+    std::cout << "Thread 2 acquired m2\n";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::lock_guard<std::mutex> lock2(m1);
+    std::cout << "Thread 2 acquired m1\n";
+}
+
+int main() {
+    std::thread t1(thread1);
+    std::thread t2(thread2);
+
+    t1.join();
+    t2.join();
+}
+
+```
+
+Note: Add `#include <chrono>` for `std::chrono::milliseconds`.
+
+The sleep makes the problematic interleaving easier to reproduce, but deadlock is not guaranteed on every run. If both threads acquire their first 
+mutex before either acquires its second, they can deadlock. Once deadlocked, `join()` also blocks indefinitely.
+
+## 2. Fix the deadlock using `std::scoped_lock`
+
+C++17 introduced `std::scoped_lock`, which can acquire multiple mutexes together using a deadlock-avoidance algorithm.
+
+Instead of acquiring the mutexes one by one in different orders, pass both mutexes to the same `std::scoped_lock`.
+
+```
+
+#include <iostream>
+#include <mutex>
+#include <thread>
+
+std::mutex m1;
+std::mutex m2;
+
+void thread1() {
+    std::scoped_lock lock(m1, m2);
+
+    std::cout << "Thread 1 acquired both mutexes\n";
+
+    // Safely access shared resources protected by m1 and m2.
+}
+
+void thread2() {
+    std::scoped_lock lock(m2, m1);
+
+    std::cout << "Thread 2 acquired both mutexes\n";
+
+    // Safely access shared resources protected by m1 and m2.
+}
+
+int main() {
+    std::thread t1(thread1);
+    std::thread t2(thread2);
+
+    t1.join();
+    t2.join();
+
+    std::cout << "Both threads completed\n";
+}
+
+```
+
+Compile and run:
+
+```
+g++ -std=c++17 -pthread deadlock.cpp -o deadlock
+./deadlock
+```
+
+Both threads can complete, regardless of the order in which they list the mutexes in `std::scoped_lock`.
+
+### Why does this fix work?
+
+1. Deadlock avoidance: `std::scoped_lock` uses a deadlock-avoidance mechanism when acquiring multiple mutexes. If it cannot acquire them all, 
+it can release acquired locks and retry rather than indefinitely holding one while waiting for another.
+2. RAII: The lock object automatically releases both mutexes when it goes out of scope, including when the function exits through an exception.
+3. Order independence: Both threads can request the same mutex set without having to agree on a manual locking order.
+
+## 3. `std::lock_guard` vs. `std::scoped_lock`
+
+| Feature                                 | `std::lock_guard`               | `std::scoped_lock`                |
+| --------------------------------------- | ------------------------------- | --------------------------------- |
+| Standard                                | C++11                           | C++17                             |
+| Single mutex                            | Yes                             | Yes                               |
+| Multiple mutexes                        | No, one mutex per guard         | Yes                               |
+| Deadlock avoidance for multiple mutexes | Not by itself                   | Yes, when acquiring them together |
+| Automatic unlock                        | Yes                             | Yes                               |
+| Typical use                             | Simple, single-mutex protection | Multiple-mutex protection         |
+
+An alternative before C++17 is to use `std::lock(m1, m2)` to acquire both mutexes safely and then adopt the locks with `std::lock_guard` or `std::unique_lock`. 
+In modern C++, `std::scoped_lock` is generally the simpler option.
+
+## 4. Staff-level interview takeaway
+
+A strong interview answer should mention that deadlock traditionally has four necessary conditions:
+
+- Mutual exclusion: A resource can be held by only one thread at a time.
+- Hold and wait: A thread holds one resource while waiting for another.
+- No preemption: A resource cannot simply be taken away from its owner.
+- Circular wait: Threads form a cycle of dependencies.
+
+`std::scoped_lock` helps prevent deadlock when acquiring multiple mutexes as a group. It does not eliminate every possible deadlock in a program—for example, deadlocks 
+involving other locks acquired separately or inconsistent locking across different code paths can still occur.
+
+Interview one-liner: “`std::scoped_lock` provides RAII-based ownership of multiple mutexes and uses deadlock-avoidance logic to acquire them together, eliminating the classic 
+opposite-lock-order deadlock.”
