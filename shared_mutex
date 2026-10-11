@@ -148,3 +148,163 @@ I'd also consider writer latency and fairness, avoid unsafe read-to-write upgrad
 At larger scale, I'd question whether one shared mutex is itself the bottleneck and consider sharding, immutable snapshots, atomics, or other synchronization strategies
 depending on the access pattern.
 
+
+================================================================================================================================================================================================
+
+Implement a read/write shared structure using std::shared_mutex.
+
+
+
+For a MAANG Staff-level C++ interview, a good way to demonstrate `std::shared_mutex` is to implement a thread-safe shared structure where multiple readers 
+can access data concurrently, but writers require exclusive access.
+
+## 1. Implementation: Thread-safe shared structure
+
+We'll implement a shared key-value store using `std::unordered_map`, `std::shared_mutex`, `std::shared_lock`, and `std::unique_lock`.
+
+```
+
+#include <iostream>
+#include <unordered_map>
+#include <shared_mutex>
+#include <thread>
+#include <vector>
+#include <string>
+
+class ThreadSafeStore {
+private:
+    std::unordered_map<std::string, int> data;
+    mutable std::shared_mutex mtx;
+
+public:
+    // Multiple readers can execute concurrently.
+    int read(const std::string& key) const {
+        std::shared_lock<std::shared_mutex> lock(mtx);
+
+        auto it = data.find(key);
+        if (it != data.end()) {
+            return it->second;
+        }
+        return -1; // Key not found
+    }
+
+    // Only one writer can modify the structure at a time.
+    void write(const std::string& key, int value) {
+        std::unique_lock<std::shared_mutex> lock(mtx);
+        data[key] = value;
+    }
+
+    void erase(const std::string& key) {
+        std::unique_lock<std::shared_mutex> lock(mtx);
+        data.erase(key);
+    }
+};
+
+int main() {
+    ThreadSafeStore store;
+
+    store.write("speed", 100);
+    store.write("rpm", 2500);
+
+    std::vector<std::thread> threads;
+
+    // Launch multiple readers.
+    for (int i = 0; i < 4; ++i) {
+        threads.emplace_back([&store, i]() {
+            int speed = store.read("speed");
+            std::cout << "Reader " << i
+                      << " read speed = " << speed << '\n';
+        });
+    }
+
+    // Launch a writer.
+    threads.emplace_back([&store]() {
+        store.write("speed", 120);
+        std::cout << "Writer updated speed\n";
+    });
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    std::cout << "Final speed = "
+              << store.read("speed") << '\n';
+
+    return 0;
+}
+
+```
+
+### Compile and run
+
+```
+g++ -std=c++17 -Wall -Wextra -pthread shared_store.cpp -o shared_store
+./shared_store
+```
+
+The order of thread output can vary between executions because thread scheduling is nondeterministic. Readers may observe either `100` or `120`, 
+depending on whether they read before or after the writer updates the value.
+
+## 2. How the locking works
+
+Reader 1 + Reader 2 + Reader 3
+
+Use `std::shared_lock`. Multiple readers can hold shared ownership simultaneously.
+
+Writer
+
+Uses `std::unique_lock`. It needs exclusive ownership, so it cannot overlap with any reader or another writer.
+
+| Operation | Lock type          | Concurrent access    |
+| --------- | ------------------ | -------------------- |
+| `read()`  | `std::shared_lock` | Other readers        |
+| `write()` | `std::unique_lock` | No other lock holder |
+| `erase()` | `std::unique_lock` | No other lock holder |
+
+### Why use `mutable` for the mutex?
+
+The `read()` method is `const`, because reading does not logically modify the store. However, acquiring and releasing a mutex changes its synchronization state.
+
+Declaring the mutex `mutable` allows it to be locked inside a `const` method without making the actual stored data mutable.
+
+### Why use RAII locks?
+
+Both lock types automatically release their locks when they leave scope, including when an exception is thrown. This prevents common mistakes such as forgetting to unlock a mutex.
+
+- `std::shared_lock` provides shared ownership of the mutex.
+- `std::unique_lock` provides exclusive ownership and supports deferred locking, unlocking, and relocking.
+
+## 3. Important Staff-level interview considerations
+
+1\. Does `shared_mutex` always improve performance?
+
+No. It is beneficial when reads are frequent, concurrent reads are expensive enough to justify synchronization overhead, and write contention is relatively low. 
+For small or highly write-intensive structures, an ordinary `std::mutex` may perform better.
+
+2\. Can a writer starve?
+
+Yes, depending on the implementation's locking policy. The C++ standard does not guarantee a universal writer-fair scheduling policy for `std::shared_mutex`.
+
+3\. Is returning a reference safe?
+
+Not automatically. If `read()` returned a reference to an element, its lock would be released when the function returned. Another thread could then erase or modify that element. 
+Returning a value, as this example does, avoids that lifetime and synchronization problem.
+
+4\. Can a thread acquire a shared lock and then acquire an exclusive lock on the same mutex?
+
+Do not assume that it can safely upgrade a shared lock to an exclusive lock. `std::shared_mutex` has no atomic upgrade operation; release the shared lock and acquire an exclusive lock,
+then recheck any condition that matters.
+
+5\. What about read-modify-write operations?
+
+The following is not an atomic operation:
+
+```
+int value = store.read("speed");
+store.write("speed", value + 1);
+```
+
+Two threads can read the same value and overwrite each other's updates. A method such as `increment()` should acquire one exclusive lock for the entire read-modify-write sequence.
+
+Interview takeaway: `std::shared_mutex` is useful for read-heavy shared data, but correctness depends on protecting the entire logical operation, managing object lifetimes, 
+and considering contention and fairness—not merely replacing `std::mutex` with `std::shared_mutex`.
