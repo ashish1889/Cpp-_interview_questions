@@ -1,0 +1,489 @@
+# C++ Futures and Promises — MAANG Staff-Level Interview Guide
+
+In C++, `std::future` and `std::promise` are synchronization primitives that let one thread produce a result and another thread retrieve it, potentially before the result is ready.
+
+For a Staff Engineer interview, you should understand more than their syntax. You should be able to explain their shared state, synchronization guarantees, exception propagation, 
+performance trade-offs, deadlock risks, and how they compare with `std::condition_variable`, `std::async`, and `std::packaged_task`.
+
+## 1. The core concept
+
+Imagine a worker thread calculates the result of an expensive operation. The main thread needs that result, but the calculation may not have finished yet.
+
+Producer / Worker Thread
+
+Calculates a result or captures an exception
+
+`promise.set_value(result)`
+
+Shared state: value, exception and readiness
+
+Consumer / Main Thread
+
+Waits until the result becomes ready
+
+`future.get()`
+
+The important distinction:
+
+- `std::promise<T>` is a mechanism for setting a result or exception in a shared state.
+- `std::future<T>` is a mechanism for waiting for that shared state and retrieving its result.
+- The shared state connects the producer and consumer. It stores the result or exception and tracks whether it is ready.
+
+A future does not necessarily create a thread. A promise does not necessarily execute work. They coordinate the transfer of a result between execution contexts.
+
+## 2. Basic example: Promise and future across two threads
+
+```
+#include <chrono>
+#include <future>
+#include <iostream>
+#include <thread>
+
+int main() {
+    std::promise<int> promise;
+    std::future<int> future = promise.get_future();
+
+    std::thread worker([p = std::move(promise)]() mutable {
+        std::this_thread::sleep_for(
+            std::chrono::seconds(2));
+
+        p.set_value(42);
+    });
+
+    std::cout << "Waiting for result...\n";
+
+    int result = future.get();
+
+    std::cout << "Result: " << result << '\n';
+
+    worker.join();
+    return 0;
+}
+```
+
+Possible output:
+
+```
+Waiting for result...
+Result: 42
+```
+
+### Execution flow
+
+1. The main thread creates a promise and obtains its associated future.
+2. The promise is moved into the worker thread's lambda.
+3. The worker performs its operation and calls `set_value(42)`.
+4. The shared state becomes ready.
+5. `future.get()` returns the value once it is ready.
+6. The main thread joins the worker before exiting.
+
+Staff-level detail: `future.get()` blocks only if the shared state is not ready. Once it retrieves the result, that particular `std::future` becomes invalid for further retrieval.
+Also, `std::future` is not generally a multi-consumer result-sharing mechanism.
+
+## 3. Why do we need both a promise and a future?
+
+Consider two different designs.
+
+| Requirement                                              | Suitable mechanism                   |
+| -------------------------------------------------------- | ------------------------------------ |
+| A worker explicitly publishes a result to another thread | `std::promise` + `std::future`       |
+| Run a callable asynchronously and obtain its result      | `std::async`                         |
+| Wrap a callable so its result can be retrieved later     | `std::packaged_task` + `std::future` |
+| Multiple consumers need to read the same result          | `std::shared_future`                 |
+| Repeated notifications or complex wait predicates        | `std::condition_variable`            |
+
+The key design choice is who controls execution and who controls result publication?
+
+With a promise, you explicitly decide when to publish the result. This is useful for asynchronous callbacks, hardware responses, IPC completion events, 
+and operations whose completion is controlled by another subsystem.
+
+## 4. Promise and future: exception propagation
+
+One of the most important interview topics is what happens when the producer fails.
+
+A promise can publish an exception using `set_exception()`. The consumer receives that exception when it calls `get()`.
+
+```
+#include <exception>
+#include <future>
+#include <iostream>
+#include <stdexcept>
+#include <thread>
+
+int main() {
+    std::promise<int> promise;
+    auto future = promise.get_future();
+
+    std::thread worker(
+        [p = std::move(promise)]() mutable {
+            try {
+                throw std::runtime_error(
+                    "Hardware initialization failed");
+            } catch (...) {
+                p.set_exception(
+                    std::current_exception());
+            }
+        });
+
+    try {
+        int value = future.get();
+        std::cout << value << '\n';
+    } catch (const std::exception& e) {
+        std::cout << "Worker failed: "
+                  << e.what() << '\n';
+    }
+
+    worker.join();
+}
+```
+
+Output:
+
+```
+Worker failed: Hardware initialization failed
+```
+
+### Why this matters in production
+
+Imagine an Android Automotive system where a background worker initializes a vendor service or communicates with a hardware abstraction layer.
+
+The consumer should not wait forever or mistake a failed initialization for a valid result. The producer can publish either:
+
+- A successful result using `set_value()`.
+- A failure using `set_exception()`.
+
+The consumer handles both outcomes through `get()`.
+
+Important: `std::promise` does not automatically catch arbitrary exceptions thrown in a separately created thread. An uncaught exception escaping a thread's entry 
+function calls `std::terminate()`. You must catch the exception and publish it, or use an abstraction such as `std::packaged_task` that captures callable exceptions.
+
+## 5. `std::async` versus `std::promise`
+
+This is a common MAANG interview comparison.
+
+### Example A: `std::async`
+
+Use `std::async` when you want to execute a callable and retrieve its result without manually publishing it.
+
+```
+#include <future>
+#include <iostream>
+
+int calculate() {
+    return 10 * 20;
+}
+
+int main() {
+    auto future = std::async(
+        std::launch::async,
+        calculate);
+
+    std::cout << future.get() << '\n';
+}
+```
+
+Here, `std::async` manages the association between the callable's execution and the future's shared state.
+
+### Example B: `std::promise`
+
+```
+#include <future>
+#include <iostream>
+#include <thread>
+
+int main() {
+    std::promise<int> promise;
+    auto future = promise.get_future();
+
+    std::thread worker(
+        [p = std::move(promise)]() mutable {
+            // The operation may be controlled by
+            // an external event or callback.
+            p.set_value(200);
+        });
+
+    std::cout << future.get() << '\n';
+
+    worker.join();
+}
+```
+
+Here, you explicitly decide when the result is published.
+
+### Comparison
+
+| Feature                     | `std::async`                      | `std::promise`                                                        |
+| --------------------------- | --------------------------------- | --------------------------------------------------------------------- |
+| Executes callable           | Yes                               | No                                                                    |
+| Explicit result publication | Usually no                        | Yes                                                                   |
+| Exception propagation       | Automatic for callable exceptions | Explicitly publish exceptions, or let a broken promise signal failure |
+| Thread policy               | Depends on launch policy          | You choose how work executes                                          |
+| Best use                    | Asynchronous function execution   | Custom completion and signaling                                       |
+
+Critical interview trap: If you call `std::async` without specifying a launch policy, the implementation may choose deferred execution. Use `std::launch::async` 
+when you require asynchronous execution rather than deferred invocation.
+
+Also, the lifetime of the future matters: destruction of the last future associated with an unfinished `std::async` operation launched with `std::launch::async` can block.
+
+## 6. `std::packaged_task`: separating work from execution
+
+A `std::packaged_task` wraps a callable and connects its return value or exception to a future. Unlike `std::async`, it does not decide where the task runs.
+
+```
+#include <future>
+#include <iostream>
+#include <thread>
+
+int multiply(int a, int b) {
+    return a * b;
+}
+
+int main() {
+    std::packaged_task<int(int, int)> task(multiply);
+
+    auto future = task.get_future();
+
+    std::thread worker(
+        std::move(task), 6, 7);
+
+    std::cout << future.get() << '\n';
+
+    worker.join();
+}
+```
+
+Output:
+
+```
+42
+```
+
+The distinction is useful when designing a task queue or executor:
+
+- The callable defines the work.
+- The packaged task captures the result or exception.
+- The executor decides which worker runs the task.
+- The future allows the caller to retrieve the outcome.
+
+A task queue can therefore schedule work independently of how callers consume its results.
+
+## 7. Waiting without immediately blocking: `wait_for()`
+
+In production systems, blocking indefinitely can be dangerous. A consumer may need to check whether a result is ready within a deadline.
+
+```
+#include <chrono>
+#include <future>
+#include <iostream>
+#include <thread>
+
+using namespace std::chrono_literals;
+
+int main() {
+    std::promise<int> promise;
+    auto future = promise.get_future();
+
+    std::thread worker(
+        [p = std::move(promise)]() mutable {
+            std::this_thread::sleep_for(500ms);
+            p.set_value(100);
+        });
+
+    if (future.wait_for(100ms) ==
+        std::future_status::ready) {
+        std::cout << future.get() << '\n';
+    } else {
+        std::cout << "Result not ready yet\n";
+    }
+
+    // Still wait for the worker before exiting.
+    worker.join();
+}
+```
+
+This will typically print:
+
+```
+Result not ready yet
+```
+
+`wait_for()` supports three possible statuses:
+
+- `std::future_status::ready`: the shared state is ready.
+- `std::future_status::timeout`: the wait duration elapsed before readiness.
+- `std::future_status::deferred`: the associated operation is deferred, where that status applies.
+
+Staff-level distinction: A timeout does not cancel the underlying operation. The worker may still be running. If you need cancellation, 
+design it explicitly using a stop token, an atomic cancellation flag, or another cooperative cancellation mechanism.
+
+## 8. `std::shared_future`: multiple consumers
+
+A standard `std::future` is designed around one consumer retrieving the result. What if several threads need the same result?
+
+Use `std::shared_future`.
+
+```
+#include <future>
+#include <iostream>
+#include <thread>
+#include <vector>
+
+int main() {
+    std::promise<int> promise;
+
+    std::shared_future<int> result =
+        promise.get_future().share();
+
+    std::vector<std::thread> consumers;
+
+    for (int i = 0; i < 3; ++i) {
+        consumers.emplace_back([result, i]() {
+            std::cout << "Consumer " << i
+                      << ": " << result.get() << '\n';
+        });
+    }
+
+    promise.set_value(99);
+
+    for (auto& thread : consumers) {
+        thread.join();
+    }
+}
+```
+
+All three consumers can retrieve `99`. The order of their printed output is unspecified, and their lines may interleave.
+
+A `shared_future` allows multiple consumers to access the same result. It is particularly useful for one-time initialization results, 
+configuration loading, or broadcasting the outcome of a single operation.
+
+One subtlety: `shared_future` makes shared access to the result possible, but it does not make arbitrary mutation of the result thread-safe. 
+If the result is a mutable object, its own synchronization requirements still apply.
+
+## 9. Advanced interview topic: broken promises
+
+What happens if the producer disappears without setting a value or exception?
+
+C++ handles this through the broken promise mechanism. If a promise is destroyed while its shared state is not ready, the state is made ready with a `std::future_error` exception.
+
+```
+#include <future>
+#include <iostream>
+
+int main() {
+    std::future<int> future;
+
+    {
+        std::promise<int> promise;
+        future = promise.get_future();
+
+        // No set_value() or set_exception().
+        // The promise is destroyed here.
+    }
+
+    try {
+        int value = future.get();
+        std::cout << value << '\n';
+    } catch (const std::future_error& e) {
+        std::cout << "Future error: "
+                  << e.what() << '\n';
+    }
+}
+```
+
+The consumer receives a `std::future_error`, typically with the error code `std::future_errc::broken_promise`.
+
+This is valuable because the consumer does not wait forever just because the promise was abandoned. However, it is not a complete application-level failure-handling strategy: 
+you still need appropriate timeouts, cancellation policies, and recovery behavior.
+
+## 10. Common mistakes and concurrency pitfalls
+
+Calling `get()` more than once on a `std::future`
+
+`get()` consumes the future's association with its shared state. Calling it again on the same future is invalid and normally 
+throws `std::future_error` with `no_state`. Use `std::shared_future` if multiple retrievals are required.
+
+Calling `set_value()` twice
+
+A promise's shared state can be made ready only once. A second attempt normally throws `std::future_error` with `promise_already_satisfied`.
+
+Forgetting to transfer ownership
+
+`std::promise` is move-only. Capture it by move when transferring it to a worker thread. Do not attempt to copy it.
+
+Waiting forever
+
+Calling `get()` or `wait()` can block indefinitely if the producer never makes the state ready and the promise remains alive. Consider `wait_for()`, failure signaling, and cancellation.
+
+Confusing readiness with cancellation
+
+A timed-out wait only means the result was not ready within the timeout. It does not terminate the worker or guarantee that the operation stopped.
+
+### Important nuance: memory synchronization
+
+The promise/future shared state also provides synchronization between making the result ready and successfully waiting for that readiness.
+The producer's operations sequenced before publishing the result can be observed by the consumer after it successfully waits for readiness, subject to the C++ synchronization rules.
+
+That does not mean all shared variables in the program become automatically thread-safe. Concurrent accesses to unrelated shared data still require proper synchronization.
+
+## 11. A Staff-level design exercise
+
+Problem: You are designing an asynchronous vehicle configuration service. Several components request the same configuration, which is loaded by a background worker.
+The load can fail, and callers should not block indefinitely.
+
+How would you design it?
+
+A reasonable design is:
+
+1. Use a background task to load the configuration.
+2. Represent the operation's completion using a promise/future pair, or a task abstraction that provides a future.
+3. Give independent consumers a `std::shared_future` if they need the same one-time result.
+4. Publish loading errors as exceptions or as an explicit result type such as `std::expected<Config, Error>` in C++23.
+5. Use timed waits only where blocking is acceptable, and define what happens when a deadline expires.
+6. Provide a separate cancellation mechanism if loading must be stopped.
+7. Avoid holding unrelated locks while waiting on a future, because doing so can deadlock other threads that need those locks to complete the operation.
+
+### What distinguishes a Staff-level answer?
+
+A strong answer goes beyond selecting the right primitive. It discusses:
+
+- Ownership: Who owns the promise, task, and shared state?
+- Liveness: Can a consumer block forever? Can shutdown deadlock?
+- Failure semantics: How are errors, timeouts, and cancellation distinguished?
+- Scalability: Are threads created per request, or is work scheduled on a bounded executor?
+- API design: Should callers receive a future, shared future, callback, or explicit result object?
+- Observability: How will the system measure task latency, queue depth, timeout rates, and failures?
+
+Futures and promises provide result transfer and synchronization. They are not a complete task scheduler, cancellation framework, or distributed RPC mechanism.
+
+## 12. Quick interview revision
+
+| Interview question                            | Strong answer                                                                                     |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Does a promise create a thread?               | No. It publishes a result or exception.                                                           |
+| Does a future execute work?                   | Not generally. `std::async` and task abstractions associate work with a future.                   |
+| What does `get()` do?                         | Waits for readiness if needed, then retrieves the value or rethrows the stored exception.         |
+| Can a future be read multiple times?          | A regular future cannot retrieve its result repeatedly; use `shared_future` for shared retrieval. |
+| What happens if a promise is destroyed early? | Its unready shared state receives a broken-promise exception.                                     |
+| Does `wait_for()` cancel work?                | No. It only limits the duration of the wait.                                                      |
+| Does `std::async` always run on a new thread? | No. The default launch policy can defer execution.                                                |
+| How do you propagate worker exceptions?       | Explicitly publish them with a promise, or use an abstraction that captures callable exceptions.  |
+| Are futures lock-free?                        | The standard does not guarantee lock-free implementation.                                         |
+| Can futures cause deadlocks?                  | Yes, through dependency cycles, waiting while holding locks, or blocking during shutdown.         |
+
+## 13. Practice exercise
+
+Try implementing this without looking at the examples above:
+
+Build an asynchronous result pipeline with these requirements:
+
+- A producer calculates a value in a worker thread.
+- A consumer waits up to 200 ms.
+- If the value is ready, print it.
+- If the producer throws an exception, report the error.
+- If the wait times out, report a timeout without pretending the worker was cancelled.
+- Ensure all threads are joined safely.
+
+For additional Staff-level practice, implement the same behavior using `std::async`, then compare the ownership, exception handling, and shutdown semantics of the two implementations.
+
+The core takeaway to remember for interviews is: a promise publishes completion; a future observes completion; a task abstraction executes work. 
+Understanding how these responsibilities interact is what makes the difference between knowing the API and designing a robust concurrent system.
