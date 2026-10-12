@@ -1,0 +1,359 @@
+After calling join on all threads, main thread waits for execution to complete on all threads, then it proceeds ahead in main thread. Below is code example with o/p-
+
+#include <iostream>
+#include <unordered_map>
+#include <shared_mutex>
+#include <thread>
+#include <vector>
+#include <string>
+#include <mutex>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include<string>
+
+std::mutex logMutex;
+
+using namespace std;
+class ThreadSafeStore {
+private:
+    std::unordered_map<std::string, int> data;
+    mutable std::shared_mutex mtx;
+
+public:
+    // Multiple readers can execute concurrently.
+    int read(const std::string& key) const {
+        std::shared_lock<std::shared_mutex> lock(mtx);
+
+        auto it = data.find(key);
+        if (it != data.end()) {
+            return it->second;
+        }
+        return -1; // Key not found
+    }
+
+    // Only one writer can modify the structure at a time.
+    void write(const std::string& key, int value) {
+        std::unique_lock<std::shared_mutex> lock(mtx);
+        data[key] = value;
+    }
+
+    void erase(const std::string& key) {
+        std::unique_lock<std::shared_mutex> lock(mtx);
+        data.erase(key);
+    }
+};
+
+
+/*void printCurrentTime(const std::string& message) {
+    auto now = std::chrono::system_clock::now();
+
+    auto time = std::chrono::system_clock::to_time_t(now);
+
+    std::cout << "[";
+
+    std::cout << std::put_time(std::localtime(&time), "%H:%M:%S");
+
+    std::cout << "] " << message << '\n';
+}*/
+
+void printCurrentTime(const std::string& message) {
+    using namespace std::chrono;
+
+    auto now = system_clock::now();
+
+    // Convert to seconds since the epoch
+    auto seconds = time_point_cast<std::chrono::seconds>(now);
+
+    // Extract the remaining milliseconds
+    auto milliseconds =
+        duration_cast<std::chrono::milliseconds>(now - seconds).count();
+
+    // Convert seconds to calendar time
+    auto time = system_clock::to_time_t(now);
+
+    std::lock_guard<std::mutex> lock(logMutex);
+
+    std::cout << "[" 
+              << std::put_time(std::localtime(&time), "%H:%M:%S")
+              << "." << std::setfill('0') << std::setw(3)
+              << milliseconds
+              << "] " << message << '\n';
+}
+
+int main() {
+    ThreadSafeStore store;
+
+    store.write("speed", 100);
+    store.write("rpm", 2500);
+
+    std::vector<std::thread> threads;
+
+    // Launch multiple readers.
+    for (int i = 0; i < 4; ++i) {
+        threads.emplace_back([&store, i]() {
+            int speed = store.read("speed");
+            //std::cout << "Reader " << i
+                      //<< " read speed = " << speed << '\n';
+            std::string s = "Reader "+to_string(i)+" rear speed = "+to_string(speed)+'\n';
+            printCurrentTime(s);
+        });
+    }
+
+    // Launch a writer.
+    threads.emplace_back([&store]() {
+        store.write("speed", 120);
+        std::cout << "Writer updated speed\n";
+    });
+
+    for (auto& t : threads) {
+        t.join();
+    }
+   // std::cout<<"Time after-"<<std::chrono
+    printCurrentTime("Final Speed"+to_string(store.read("speed")));
+    //std::cout << "Final speed = "
+                 // << store.read("speed") << '\n';
+
+    return 0;
+}
+
+O/p-
+
+[Writer updated speed
+20:58:07.887] Reader 0 rear speed = 100
+
+[20:58:07.887] Reader 1 rear speed = 100
+
+[20:58:07.887] Reader 2 rear speed = 100
+
+[20:58:07.887] Reader 3 rear speed = 100
+
+[20:58:07.888] Final Speed120
+
+====================================================================>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>><<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<==========================================
+If we remove mutable from mutable std::shared_mutex mtx; in below code , it gives error as shared_mutex is getting called from const function which doesnot allow any modification in the method
+but shared_mutex undergoes modification in const function read,so it throws error.
+
+#include <iostream>
+#include <unordered_map>
+#include <shared_mutex>
+#include <thread>
+#include <vector>
+#include <string>
+#include <mutex>
+
+class ThreadSafeStore {
+private:
+    std::unordered_map<std::string, int> data;
+    std::shared_mutex mtx;
+
+public:
+    // Multiple readers can execute concurrently.
+    int read(const std::string& key) const{
+        std::shared_lock<std::shared_mutex> lock(mtx);
+
+        auto it = data.find(key);
+        if (it != data.end()) {
+            return it->second;
+        }
+        return -1; // Key not found
+    }
+
+    // Only one writer can modify the structure at a time.
+    void write(const std::string& key, int value) {
+        std::unique_lock<std::shared_mutex> lock(mtx);
+        data[key] = value;
+    }
+
+    void erase(const std::string& key) {
+        std::unique_lock<std::shared_mutex> lock(mtx);
+        data.erase(key);
+    }
+};
+
+int main() {
+    ThreadSafeStore store;
+
+    store.write("speed", 100);
+    store.write("rpm", 2500);
+
+    std::vector<std::thread> threads;
+
+    // Launch multiple readers.
+    for (int i = 0; i < 4; ++i) {
+        threads.emplace_back([&store, i]() {
+            int speed = store.read("speed");
+            std::cout << "Reader " << i
+                      << " read speed = " << speed << '\n';
+        });
+    }
+
+    // Launch a writer.
+    threads.emplace_back([&store]() {
+        store.write("speed", 120);
+        std::cout << "Writer updated speed\n";
+    });
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    std::cout << "Final speed = "
+              << store.read("speed") << '\n';
+
+    return 0;
+}
+
+
+ERROR!
+/tmp/NwpwAH9UBl-v9IEECEx/main.cpp: In member function 'int ThreadSafeStore::read(const std::string&) const':
+/tmp/NwpwAH9UBl-v9IEECEx/main.cpp:17:53: error: no matching function for call to 'std::shared_lock<std::shared_mutex>::shared_lock(const std::shared_mutex&)'
+   17 |         std::shared_lock<std::shared_mutex> lock(mtx);
+      |                                                     ^
+ERROR!
+In file included from /tmp/NwpwAH9UBl-v9IEECEx/main.cpp:3:
+/usr/local/include/c++/14.2.0/shared_mutex:741:7: note: candidate: 'std::shared_lock<_Mutex>::shared_lock(mutex_type&) [with _Mutex = std::shared_mutex; mutex_type = std::shared_mutex]' (near match)
+  741 |       shared_lock(mutex_type& __m)
+      |       ^~~~~~~~~~~
+/usr/local/include/c++/14.2.0/shared_mutex:741:7: note:   conversion of argument 1 would be ill-formed:
+/tmp/NwpwAH9UBl-v9IEECEx/main.cpp:17:50: error: binding reference of type 'std::shared_lock<std::shared_mutex>::mutex_type&' {aka 'std::shared_mutex&'} to 'const std::shared_mutex' discards qualifiers
+   17 |         std::shared_lock<std::shared_mutex> lock(mtx);
+      |                                                  ^~~
+/usr/local/include/c++/14.2.0/shared_mutex:761:9: note: candidate: 'template<class _Rep, class _Period> std::shared_lock<_Mutex>::shared_lock(mutex_type&, const std::chrono::duration<_Rep, _Period>&) [with _Period = _Rep; _Mutex = std::shared_mutex]'
+  761 |         shared_lock(mutex_type& __m,
+      |         ^~~~~~~~~~~
+/usr/local/include/c++/14.2.0/shared_mutex:761:9: note:   candidate expects 2 arguments, 1 provided
+/usr/local/include/c++/14.2.0/shared_mutex:755:9: note: candidate: 'template<class _Clock, class _Duration> std::shared_lock<_Mutex>::shared_lock(mutex_type&, const std::chrono::time_point<_Clock, _Duration>&) [with _Duration = _Clock; _Mutex = std::shared_mutex]'
+  755 |         shared_lock(mutex_type& __m,
+      |         ^~~~~~~~~~~
+/usr/local/include/c++/14.2.0/shared_mutex:755:9: note:   candidate expects 2 arguments, 1 provided
+/usr/local/include/c++/14.2.0/shared_mutex:775:7: note: candidate: 'std::shared_lock<_Mutex>::shared_lock(std::shared_lock<_Mutex>&&) [with _Mutex = std::shared_mutex]'
+  775 |       shared_lock(shared_lock&& __sl) noexcept : shared_lock()
+      |       ^~~~~~~~~~~
+/usr/local/include/c++/14.2.0/shared_mutex:775:33: note:   no known conversion for argument 1 from 'const std::shared_mutex' to 'std::shared_lock<std::shared_mutex>&&'
+  775 |       shared_lock(shared_lock&& __sl) noexcept : shared_lock()
+      |                   ~~~~~~~~~~~~~~^~~~
+/usr/local/include/c++/14.2.0/shared_mutex:751:7: note: candidate: 'std::shared_lock<_Mutex>::shared_lock(mutex_type&, std::adopt_lock_t) [with _Mutex = std::shared_mutex; mutex_type = std::shared_mutex]'
+  751 |       shared_lock(mutex_type& __m, adopt_lock_t)
+      |       ^~~~~~~~~~~
+/usr/local/include/c++/14.2.0/shared_mutex:751:7: note:   candidate expects 2 arguments, 1 provided
+/usr/local/include/c++/14.2.0/shared_mutex:748:7: note: candidate: 'std::shared_lock<_Mutex>::shared_lock(mutex_type&, std::try_to_lock_t) [with _Mutex = std::shared_mutex; mutex_type = std::shared_mutex]'
+  748 |       shared_lock(mutex_type& __m, try_to_lock_t)
+      |       ^~~~~~~~~~~
+/usr/local/include/c++/14.2.0/shared_mutex:748:7: note:   candidate expects 2 arguments, 1 provided
+/usr/local/include/c++/14.2.0/shared_mutex:745:7: note: candidate: 'std::shared_lock<_Mutex>::shared_lock(mutex_type&, std::defer_lock_t) [with _Mutex = std::shared_mutex; mutex_type = std::shared_mutex]'
+  745 |       shared_lock(mutex_type& __m, defer_lock_t) noexcept
+      |       ^~~~~~~~~~~
+/usr/local/include/c++/14.2.0/shared_mutex:745:7: note:   candidate expects 2 arguments, 1 provided
+/usr/local/include/c++/14.2.0/shared_mutex:738:7: note: candidate: 'std::shared_lock<_Mutex>::shared_lock() [with _Mutex = std::shared_mutex]'
+  738 |       shared_lock() noexcept : _M_pm(nullptr), _M_owns(false) { }
+      |       ^~~~~~~~~~~
+/usr/local/include/c++/14.2.0/shared_mutex:738:7: note:   candidate expects 0 arguments, 1 provided
+
+
+=== Code Exited With Errors ===
+
+=============================================================>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>><<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<==================================
+
+In C++, the explicit keyword is a specifier used to prevent the compiler from performing unintended implicit type conversions or copy-initializations
+By default, if a class has a constructor that can be called with a single argument, the C++ compiler treats it as a converting constructor. This means the compiler will automatically and silently
+convert that single argument's data type into an object of your class whenever it feels it is necessary to make the code compile. Marking a constructor or conversion operator as explicit 
+shuts down this behavior, forcing the programmer to write clear, deliberate code
+
+
+Why is explicit Needed? (The Problem)
+
+Imagine a class that wraps a dynamic array buffer:
+
+#include <iostream>
+
+class Buffer {
+public:
+    // Converting constructor (takes a single argument)
+    Buffer(int size) {
+        std::cout << "Created a buffer of size " << size << "\n";
+    }
+};
+
+void printBuffer(const Buffer& buf) {
+    // Expects a Buffer object
+}
+
+int main() {
+    Buffer b = 10;      // Implicit conversion: Looks like an integer assignment, but calls Buffer(10)
+    printBuffer(20);    // Implicit conversion: Accidentally passes an int where a Buffer is expected!
+}
+
+
+Why this is dangerous: Passing 20 to printBuffer is syntactically legal to the compiler. It will silently construct a temporary Buffer of size 20. 
+If a developer accidentally types printBuffer(some_index) instead of passing an actual buffer object, the compiler will not catch the typo, hiding subtle runtime bugs
+
+
+The Solution: Using explicit
+
+Adding the explicit keyword before the constructor requires you to use direct initialization or an explicit type cast
+
+class Buffer {
+public:
+    // Added explicit keyword
+    explicit Buffer(int size) {
+        std::cout << "Created a buffer of size " << size << "\n";
+    }
+};
+
+void printBuffer(const Buffer& buf) {}
+
+int main() {
+    // Buffer b1 = 10;   // COMPILER ERROR! Implicit conversion is forbidden.
+    // printBuffer(20);  // COMPILER ERROR! Cannot implicitly convert int to Buffer.
+
+    // Correct explicitly defined ways:
+    Buffer b2(10);                    // Direct initialization (Allowed)
+    Buffer b3 = Buffer(10);           // Explicit creation (Allowed)
+    printBuffer(Buffer(20));          // Explicit temporary creation (Allowed)
+    printBuffer(static_cast<Buffer>(20)); // Explicit type casting (Allowed)
+}
+
+
+
+Modern C++ Extensions
+
+Over time, the C++ standard expanded how explicit can be applied:
+
+1. Explicit Conversion Operators (Since C++11)
+
+Just like constructors convert a foreign type → your class, custom conversion operators convert your class → a foreign type. You can make these explicit to avoid accidental evaluation
+
+class Handle {
+public:
+    // Prevent accidental conversion to bool in math equations
+    explicit operator bool() const { return true; }
+};
+
+int main() {
+    Handle h;
+    // bool flag = h;        // ERROR: Implicit conversion disabled
+    bool flag = static_cast<bool>(h); // OK
+
+    if (h) { /* ... */ }    // OK: Condition checks still allow implicit evaluation
+}
+
+
+
+2. Conditional explicit(bool) (Since C++20)
+
+Introduced in C++20, you can make a constructor conditionally explicit using a boolean constant expression. This is widely used in template programming (like std::pair or std::tuple)
+
+template<typename T>
+class Wrapper {
+public:
+    // Explicit ONLY if T is an integral type (like int, char)
+    explicit(std::is_integral_v<T>) Wrapper(T val) {}
+};
+
+
+Summary of Best Practices
+
+• Always use explicit on constructors that take a single argument unless you have a specific architectural reason to 
+allow automatic conversion (e.g., a custom String class converting a const char*)
+Apply explicit to conversion operators to avoid your objects being silently evaluated inside standard arithmetic operations
