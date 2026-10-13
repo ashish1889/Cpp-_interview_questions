@@ -1,0 +1,249 @@
+# Implement a Multi-Producer, Single-Consumer (MPSC) Queue in C++
+
+For a MAANG Staff Engineer interview, a good implementation should demonstrate thread safety, condition variables, correct shutdown handling, and avoidance of busy waiting.
+
+We'll implement a queue where:
+
+- Multiple producers can concurrently push items into a shared queue.
+- One consumer waits for items and processes them.
+- `std::mutex` protects the queue and shared state.
+- `std::condition_variable` wakes the consumer when work arrives or shutdown begins.
+- A shutdown flag lets the consumer exit cleanly after all queued items are processed.
+
+## 1. Complete C++ implementation
+
+```
+
+#include <chrono>
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <vector>
+
+class MPSCQueue {
+private:
+    std::queue<int> q;
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool stopped = false;
+
+public:
+    // Called by multiple producer threads.
+    bool push(int value) {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+
+            // Reject new work after shutdown begins.
+            if (stopped) {
+                return false;
+            }
+
+            q.push(value);
+        }
+
+        // Notify after releasing the mutex.
+        cv.notify_one();
+        return true;
+    }
+
+    // Called by the single consumer thread.
+    bool pop(int& value) {
+        std::unique_lock<std::mutex> lock(mtx);
+
+        // Sleep until work arrives or shutdown begins.
+        cv.wait(lock, [this] {
+            return !q.empty() || stopped;
+        });
+
+        // Shutdown and no remaining work.
+        if (q.empty()) {
+            return false;
+        }
+
+        value = q.front();
+        q.pop();
+        return true;
+    }
+
+    // Prevent new work and wake the consumer.
+    void shutdown() {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            stopped = true;
+        }
+
+        cv.notify_one();
+    }
+};
+
+int main() {
+    MPSCQueue queue;
+
+    constexpr int NUM_PRODUCERS = 3;
+    constexpr int ITEMS_PER_PRODUCER = 5;
+
+    std::vector<std::thread> producers;
+
+    for (int p = 0; p < NUM_PRODUCERS; ++p) {
+        producers.emplace_back([p, &queue] {
+            for (int i = 0; i < ITEMS_PER_PRODUCER; ++i) {
+                int value = p * 100 + i;
+
+                if (queue.push(value)) {
+                    std::cout << "Producer " << p
+                              << " pushed " << value << '\n';
+                }
+            }
+        });
+    }
+
+    // Exactly one consumer.
+    std::thread consumer([&queue] {
+        int value;
+
+        while (queue.pop(value)) {
+            std::cout << "Consumer processed "
+                      << value << '\n';
+        }
+
+        std::cout << "Consumer exiting\n";
+    });
+
+    // Ensure every producer has finished publishing work.
+    for (auto& producer : producers) {
+        producer.join();
+    }
+
+    // No more items will be produced.
+    queue.shutdown();
+
+    consumer.join();
+
+    return 0;
+}
+
+```
+
+Compile and run:
+
+```
+g++ -std=c++17 -pthread mpsc_queue.cpp -o mpsc_queue
+./mpsc_queue
+```
+
+The output order may vary because producers run concurrently. Each successfully pushed item will be processed once, provided the program completes normally.
+
+## 2. How the condition variable works
+
+The most important part is the consumer's `pop()` method.
+
+```
+bool pop(int& value) {
+    std::unique_lock<std::mutex> lock(mtx);
+
+    cv.wait(lock, [this] {
+        return !q.empty() || stopped;
+    });
+
+    if (q.empty()) {
+        return false;
+    }
+
+    value = q.front();
+    q.pop();
+    return true;
+}
+```
+
+Let's break it down.
+
+### Step 1: Acquire the mutex
+
+```
+std::unique_lock<std::mutex> lock(mtx);
+```
+
+The consumer locks the mutex before checking the queue. This prevents concurrent producers from modifying the queue while it is being inspected.
+
+### Step 2: Wait using a predicate
+
+```
+cv.wait(lock, [this] {
+    return !q.empty() || stopped;
+});
+```
+
+The predicate means:
+
+- `!q.empty()` — an item is available.
+- `stopped` — shutdown has started.
+
+If neither condition is true, the consumer sleeps. While waiting, `cv.wait()` atomically releases the mutex and begins waiting. 
+When awakened, it reacquires the mutex before checking the predicate again.
+
+Why use a predicate instead of `cv.wait(lock)` alone?
+
+Because condition variables can wake spuriously, and notifications can occur before a thread starts waiting. 
+The predicate ensures that the consumer proceeds only when the shared state permits it.
+
+### Step 3: Handle shutdown
+
+```
+if (q.empty()) {
+    return false;
+}
+```
+
+If shutdown has started and the queue is empty, the consumer exits.
+
+If items remain in the queue, the consumer continues processing them even after shutdown begins.
+
+
+## 4. Important concurrency considerations
+
+| Concern                     | How the implementation handles it          |
+| --------------------------- | ------------------------------------------ |
+| Concurrent producers        | Mutex serializes queue modifications       |
+| Consumer with no work       | Sleeps instead of busy-waiting             |
+| Spurious wakeups            | Predicate-based `wait()`                   |
+| Lost notifications          | Shared state is checked under the mutex    |
+| Shutdown with pending items | Remaining items are drained                |
+| Push after shutdown         | Rejected by `push()`                       |
+| Deadlock risk               | RAII locks release the mutex automatically |
+
+### Why `std::unique_lock` instead of `std::lock_guard`?
+
+`condition_variable::wait()` requires a `std::unique_lock<std::mutex>` because it must temporarily release the mutex while the thread waits and reacquire it before returning.
+
+A `std::lock_guard` cannot perform this unlock/relock operation.
+
+### Why notify after unlocking?
+
+```
+{
+    std::lock_guard<std::mutex> lock(mtx);
+    q.push(value);
+}
+cv.notify_one();
+```
+
+This is a common pattern because it allows the consumer to acquire the mutex immediately after waking rather than contending with the producer that just inserted the item.
+
+Notifying while holding the mutex can also be correct; unlocking first is a performance-oriented convention, not a correctness requirement.
+
+## 5. Staff-level interview follow-up questions
+
+Be prepared to discuss these extensions:
+
+1. How would you implement bounded capacity? Add a second condition variable to block producers while the queue is full.
+2. How would you support multiple consumers? Use `notify_one()` for newly available work and reconsider shutdown notifications so all waiting consumers can exit.
+3. How would you implement timed waits? Use `cv.wait_for()` with a predicate.
+4. Is this lock-free? No. The queue is thread-safe but mutex-based.
+5. Can items be processed in producer order? The queue preserves insertion order, but concurrent producers have no guaranteed global ordering beyond the order in 
+which their insertions acquire the mutex.
+6. What happens if a producer throws while creating an item? RAII protects the mutex, but exception handling and item-delivery guarantees depend on the 
+operation and application requirements.
+
+Key interview takeaway: The hardest part is not inserting and removing elements. It is coordinating the queue's state, waiting correctly, and ensuring shutdown doesn't lose work or leave the consumer blocked indefinitely.
