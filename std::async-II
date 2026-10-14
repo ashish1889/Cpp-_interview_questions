@@ -1,0 +1,153 @@
+To convert a long-running function into an asynchronous task using `std::async`, you can execute the function on a separate execution thread while the calling thread continues 
+doing other work. The result can be retrieved later using `std::future`.
+
+This is a useful C++ concurrency pattern for a MAANG Staff Engineer interview.
+
+## 1. Complete C++ example
+
+```
+#include <iostream>
+#include <future>
+#include <thread>
+#include <chrono>
+
+using namespace std::chrono_literals;
+
+// Simulates a long-running operation
+int longRunningTask(int input) {
+    std::cout << "Long-running task started on thread: "
+              << std::this_thread::get_id() << '\n';
+
+    std::this_thread::sleep_for(3s);
+
+    std::cout << "Long-running task completed\n";
+
+    return input * input;
+}
+
+int main() {
+    std::cout << "Main thread: "
+              << std::this_thread::get_id() << '\n';
+
+    // Launch the function asynchronously
+    std::future<int> result = std::async(
+        std::launch::async,
+        longRunningTask,
+        10
+    );
+
+    // Main thread continues working
+    std::cout << "Main thread is doing other work...\n";
+
+    for (int i = 1; i <= 3; ++i) {
+        std::cout << "Main thread working: " << i << '\n';
+        std::this_thread::sleep_for(500ms);
+    }
+
+    // Wait for the task to finish and retrieve its result
+    int value = result.get();
+
+    std::cout << "Result: " << value << '\n';
+
+    return 0;
+}
+```
+
+Compile and run:
+
+```
+g++ -std=c++17 async_example.cpp -pthread -o async_example
+./async_example
+```
+
+## 2. How it works
+
+### Main thread
+
+Calls `std::async()` and receives `std::future<int>`
+
+Worker execution
+
+Runs `longRunningTask(10)` and calculates the result.
+
+Main thread continues
+
+Performs other work while the task runs.
+
+`future.get()`
+
+Waits if necessary, then returns `100` or rethrows an exception from the task.
+
+### Important statements
+
+1\. Launch the task
+
+```
+std::future<int> result = std::async(
+    std::launch::async,
+    longRunningTask,
+    10
+);
+```
+
+- `std::async` schedules the callable function for execution.
+- `std::launch::async` requests asynchronous execution, rather than deferred execution.
+- `longRunningTask` is the function to execute.
+- `10` is passed as its argument.
+- `std::future<int>` represents the result that will eventually be available.
+
+2\. Continue doing other work
+
+```
+std::cout << "Main thread is doing other work...\n";
+```
+
+The main thread does not need to wait immediately after launching the task.
+
+3\. Retrieve the result
+
+```
+int value = result.get();
+```
+
+`get()` blocks only if the result is not yet ready. It retrieves the result once and makes the future invalid afterward.
+
+## 3. What happens if you omit `std::launch::async`?
+
+Compare these two calls:
+
+```
+// Requests asynchronous execution
+auto f1 = std::async(
+    std::launch::async,
+    longRunningTask,
+    10
+);
+```
+
+```
+// Execution policy is implementation-selected
+auto f2 = std::async(longRunningTask, 10);
+```
+
+Without an explicit launch policy, the implementation can choose either:
+
+- `std::launch::async`: execute asynchronously.
+- `std::launch::deferred`: delay execution until a non-timed wait, such as `get()`.
+
+For a long-running function that should run concurrently with the caller, explicitly using `std::launch::async` makes your intention clear.
+
+## 4. Staff-level interview considerations
+
+| Topic              | Key point                                                                                                               |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Return values      | `std::future<T>` retrieves the function's result.                                                                       |
+| Exceptions         | Exceptions thrown by the task are rethrown by `get()`.                                                                  |
+| Synchronization    | The future provides synchronization for result retrieval; shared mutable data still needs appropriate synchronization.  |
+| Blocking           | `get()` blocks until the result is ready.                                                                               |
+| One-time retrieval | A `std::future` supports one successful result retrieval; use `std::shared_future` when multiple consumers need access. |
+| Thread management  | `std::async` manages execution for you, but does not guarantee a particular thread-pool implementation.                 |
+| Lifetime           | With `std::launch::async`, destruction of the last future associated with an unfinished async operation may block.      |
+
+Interview takeaway: Use `std::async(std::launch::async, ...)` when you want to run a potentially long-running computation concurrently and 
+retrieve its result later. For many recurring or high-volume tasks, discuss a thread pool or task executor as a more scalable alternative.
