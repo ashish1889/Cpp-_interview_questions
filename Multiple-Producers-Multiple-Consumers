@@ -1,0 +1,276 @@
+# Implement a Multi-Producer, Multi-Consumer (MPMC) Queue in C++
+
+For a MAANG Staff Engineer interview, we'll extend the previous MPSC queue to support multiple producer threads and multiple consumer threads, 
+using `std::mutex` and `std::condition_variable`.
+
+The implementation should guarantee:
+
+- Multiple producers can safely push items concurrently.
+- Multiple consumers can safely retrieve items concurrently.
+- Consumers sleep when the queue is empty instead of busy-waiting.
+- Producers can wait when the queue reaches its capacity.
+- Shutdown wakes all waiting threads and allows queued items to be processed before consumers exit.
+
+We'll implement a bounded blocking queue in C++17. Bounded capacity is useful in production systems because it prevents 
+the queue from growing indefinitely when producers outpace consumers.
+
+## 1. Complete implementation
+
+```
+
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <vector>
+
+class MPMCQueue {
+private:
+    std::queue<int> q;
+    const std::size_t capacity;
+
+    std::mutex mtx;
+    std::condition_variable not_empty;
+    std::condition_variable not_full;
+
+    bool stopped = false;
+
+public:
+    explicit MPMCQueue(std::size_t max_capacity)
+        : capacity(max_capacity) {
+        if (capacity == 0) {
+            throw std::invalid_argument("Capacity must be > 0");
+        }
+    }
+
+    // Multiple producers can call push().
+    bool push(int value) {
+        std::unique_lock<std::mutex> lock(mtx);
+
+        not_full.wait(lock, [this] {
+            return q.size() < capacity || stopped;
+        });
+
+        if (stopped) {
+            return false;
+        }
+
+        q.push(value);
+
+        lock.unlock();
+        not_empty.notify_one();
+
+        return true;
+    }
+
+    // Multiple consumers can call pop().
+    bool pop(int& value) {
+        std::unique_lock<std::mutex> lock(mtx);
+
+        not_empty.wait(lock, [this] {
+            return !q.empty() || stopped;
+        });
+
+        // Exit only after shutdown and queue drainage.
+        if (q.empty()) {
+            return false;
+        }
+
+        value = q.front();
+        q.pop();
+
+        lock.unlock();
+        not_full.notify_one();
+
+        return true;
+    }
+
+    // Stop accepting new items and wake all blocked threads.
+    void shutdown() {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            stopped = true;
+        }
+
+        not_empty.notify_all();
+        not_full.notify_all();
+    }
+};
+
+int main() {
+    constexpr int NUM_PRODUCERS = 3;
+    constexpr int NUM_CONSUMERS = 2;
+    constexpr int ITEMS_PER_PRODUCER = 5;
+
+    MPMCQueue queue(4); // Bounded capacity = 4
+
+    std::vector<std::thread> producers;
+    std::vector<std::thread> consumers;
+
+    // Start multiple consumers.
+    for (int c = 0; c < NUM_CONSUMERS; ++c) {
+        consumers.emplace_back([c, &queue] {
+            int value;
+
+            while (queue.pop(value)) {
+                std::cout << "Consumer " << c
+                          << " processed " << value << '\n';
+            }
+
+            std::cout << "Consumer " << c
+                      << " exiting\n";
+        });
+    }
+
+    // Start multiple producers.
+    for (int p = 0; p < NUM_PRODUCERS; ++p) {
+        producers.emplace_back([p, &queue] {
+            for (int i = 0; i < ITEMS_PER_PRODUCER; ++i) {
+                int value = p * 100 + i;
+
+                if (queue.push(value)) {
+                    std::cout << "Producer " << p
+                              << " pushed " << value << '\n';
+                }
+            }
+        });
+    }
+
+    // Wait until every producer has finished.
+    for (auto& producer : producers) {
+        producer.join();
+    }
+
+    // No more items will be produced.
+    queue.shutdown();
+
+    // Consumers drain remaining items and exit.
+    for (auto& consumer : consumers) {
+        consumer.join();
+    }
+
+    std::cout << "All threads completed\n";
+    return 0;
+}
+
+```
+
+Compile and run:
+
+```
+g++ -std=c++17 -pthread mpmc_queue.cpp -o mpmc_queue
+./mpmc_queue
+```
+
+The output order is nondeterministic because the threads run concurrently. Every successfully pushed item is removed by exactly one consumer in this example.
+
+## 2. How the two condition variables work
+
+The key difference from the previous MPSC implementation is that we use two condition variables.
+
+`not_empty` — consumer coordination
+
+Consumers wait when the queue is empty. A producer calls `not_empty.notify_one()` after inserting an item.
+
+`not_full` — producer coordination
+
+Producers wait when the queue reaches its capacity. A consumer calls `not_full.notify_one()` after removing an item.
+
+## 3. Producer-side implementation
+
+```
+bool push(int value) {
+    std::unique_lock<std::mutex> lock(mtx);
+
+    not_full.wait(lock, [this] {
+        return q.size() < capacity || stopped;
+    });
+
+    if (stopped) {
+        return false;
+    }
+
+    q.push(value);
+
+    lock.unlock();
+    not_empty.notify_one();
+
+    return true;
+}
+```
+
+The sequence is:
+
+1. Acquire the mutex.
+2. Wait if the queue is full.
+3. Recheck the predicate when awakened.
+4. Reject the operation if shutdown has started.
+5. Insert the item while holding the mutex.
+6. Release the mutex and notify one waiting consumer.
+
+Why check the predicate again? Multiple producers might wake together, but only one may get the newly available slot. The others must wait again if the queue is full.
+
+## 4. Consumer-side implementation
+
+```
+bool pop(int& value) {
+    std::unique_lock<std::mutex> lock(mtx);
+
+    not_empty.wait(lock, [this] {
+        return !q.empty() || stopped;
+    });
+
+    if (q.empty()) {
+        return false;
+    }
+
+    value = q.front();
+    q.pop();
+
+    lock.unlock();
+    not_full.notify_one();
+
+    return true;
+}
+```
+
+Multiple consumers can wake concurrently, but the mutex ensures that only one consumer at a time removes an item.
+
+Notice that `stopped` does not immediately force consumers to exit. If the queue still contains items, consumers continue draining it. 
+A consumer returns `false` only when the queue is empty and shutdown has started.
+
+## 5. Shutdown and thread-safety considerations
+
+```
+void shutdown() {
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        stopped = true;
+    }
+
+    not_empty.notify_all();
+    not_full.notify_all();
+}
+```
+
+We use `notify_all()` during shutdown because every blocked producer and consumer must have the opportunity to wake up and exit.
+
+The calling code must join all producers before invoking `shutdown()` if it intends to process every item they produce. Otherwise, a producer may have its push rejected after shutdown.
+
+One additional improvement for production code is to decide how exceptions during item construction, allocation, or processing should be handled. 
+This implementation uses `int`, so it keeps the example focused on concurrency.
+
+## 6. Staff-level interview comparison
+
+| Property              | MPSC           | MPMC                                     |
+| --------------------- | -------------- | ---------------------------------------- |
+| Producers             | Multiple       | Multiple                                 |
+| Consumers             | One            | Multiple                                 |
+| Queue mutex           | Required       | Required                                 |
+| Consumer notification | `notify_one()` | `notify_one()`                           |
+| Producer backpressure | Optional       | Optional; implemented here               |
+| Shutdown wakeup       | Wake consumer  | Wake all blocked producers and consumers |
+
+Interview takeaway: The central challenge in MPMC is not just protecting the queue. It is coordinating both sides of a bounded buffer, 
+preserving invariants under contention, and ensuring shutdown cannot strand blocked threads.
