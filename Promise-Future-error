@@ -1,0 +1,112 @@
+In C++, `std::promise` and `std::future` allow a worker thread to communicate an error to the main thread. 
+The standard approach is to catch the exception in the worker thread, store it in the promise using `set_exception()`, and rethrow it in the main thread using `future.get()`.
+
+This is useful in multithreaded systems because an exception thrown in a worker thread does not automatically propagate to the thread that created it.
+
+## 1. Complete working example
+
+```
+
+#include <iostream>
+#include <future>
+#include <thread>
+#include <stdexcept>
+#include <exception>
+
+void worker(std::promise<int> promise)
+{
+    try {
+        std::cout << "Worker: Starting computation...\n";
+
+        // Simulate an error
+        throw std::runtime_error("Computation failed!");
+
+        promise.set_value(42); // Success path
+    }
+    catch (...) {
+        // Transfer the current exception to the main thread
+        promise.set_exception(std::current_exception());
+    }
+}
+
+int main()
+{
+    std::promise<int> promise;
+    std::future<int> future = promise.get_future();
+
+    // Transfer ownership of the promise to the worker thread
+    std::thread t(worker, std::move(promise));
+
+    try {
+        // Blocks until the result or exception is available
+        int result = future.get();
+        std::cout << "Result: " << result << '\n';
+    }
+    catch (const std::exception& e) {
+        std::cout << "Main thread caught error: "
+                  << e.what() << '\n';
+    }
+
+    t.join();
+
+    std::cout << "Main thread continues safely.\n";
+    return 0;
+}
+
+```
+
+### Expected output
+
+```
+Worker: Starting computation...
+Main thread caught error: Computation failed!
+Main thread continues safely.
+```
+
+## 2. How error communication works
+
+Worker thread
+
+An operation throws `std::runtime_error`
+
+`promise.set_exception(std::current_exception())`
+
+Stores the current exception in the shared state
+
+`future.get()` in the main thread
+
+Waits for completion and rethrows the stored exception
+
+Main thread catches the error
+
+Handles the failure without terminating the process
+
+## 3. Important concepts for a Staff-level interview
+
+| API                                               | Purpose                                                                      |
+| ------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `promise.get_future()`                            | Obtains the future associated with the promise's shared state.               |
+| `promise.set_value(value)`                        | Publishes a successful result.                                               |
+| `promise.set_exception(std::current_exception())` | Publishes the currently handled exception.                                   |
+| `future.get()`                                    | Waits for completion and returns the value or rethrows the stored exception. |
+| `std::move(promise)`                              | Transfers the non-copyable promise to the worker thread.                     |
+
+### Why use `catch (...)`?
+
+```
+catch (...) {
+    promise.set_exception(std::current_exception());
+}
+```
+
+This captures any currently handled exception, including exceptions that do not derive from `std::exception`. The main thread can later rethrow it through `future.get()`.
+
+### Why not throw directly from the worker?
+
+An exception escaping a thread's entry function causes `std::terminate()` to be called. It does not automatically reach `main()`.
+
+### What happens if the worker succeeds?
+
+The worker should call `promise.set_value(42)` instead of `set_exception()`. The main thread's `future.get()` then returns `42`.
+
+Interview takeaway: `std::promise` communicates a result or exception across threads, while `std::future` provides a synchronization point and a mechanism to retrieve that result or rethrow that exception.
