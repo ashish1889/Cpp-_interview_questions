@@ -1,0 +1,321 @@
+For a MAANG Staff Engineer interview, you can implement this using three `std::async` tasks that return futures, followed 
+by a final thread that waits for all three futures using `get()`.
+
+This demonstrates asynchronous execution, future synchronization, result collection, and exception propagation.
+
+## 1. Complete C++ implementation
+
+```
+
+#include <iostream>
+#include <future>
+#include <thread>
+#include <chrono>
+#include <vector>
+
+int computeValue(int id, int value)
+{
+    std::cout << "Task " << id
+              << " started on thread "
+              << std::this_thread::get_id() << '\n';
+
+    // Simulate a long-running computation
+    std::this_thread::sleep_for(
+        std::chrono::seconds(id));
+
+    int result = value * value;
+
+    std::cout << "Task " << id
+              << " completed. Result = "
+              << result << '\n';
+
+    return result;
+}
+
+int main()
+{
+    // Launch three asynchronous computations
+    std::future<int> f1 = std::async(
+        std::launch::async, computeValue, 1, 10);
+
+    std::future<int> f2 = std::async(
+        std::launch::async, computeValue, 2, 20);
+
+    std::future<int> f3 = std::async(
+        std::launch::async, computeValue, 3, 30);
+
+    // Final thread waits for all three results
+    std::thread finalThread([&]()
+    {
+        std::cout << "Final thread waiting for results...\n";
+
+        int r1 = f1.get();
+        int r2 = f2.get();
+        int r3 = f3.get();
+
+        int total = r1 + r2 + r3;
+
+        std::cout << "All tasks completed.\n";
+        std::cout << "Results: "
+                  << r1 << ", " << r2 << ", " << r3 << '\n';
+        std::cout << "Final total = " << total << '\n';
+    });
+
+    // Main thread waits for the final thread
+    finalThread.join();
+
+    std::cout << "Main thread exiting.\n";
+
+    return 0;
+}
+
+```
+
+### Compile and run
+
+```
+g++ -std=c++17 -pthread main.cpp -o main
+./main
+```
+
+## 2. How the system works
+
+Main thread
+
+Launches three asynchronous tasks
+
+Task 1
+
+10² = 100
+
+Future 1
+
+Task 2
+
+20² = 400
+
+Future 2
+
+Task 3
+
+30² = 900
+
+Future 3
+
+Final thread
+
+Calls get() on all three futures
+
+Waits for unfinished tasks and collects results
+
+Final result = 1,400
+
+## 3. Key interview concepts
+
+| Concept            | Explanation                                                                            |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| `std::async`       | Starts an asynchronous computation when used with `std::launch::async`.                |
+| `std::future<int>` | Represents a result that will become available later.                                  |
+| `get()`            | Waits for the result if necessary, returns it, and consumes the future's shared state. |
+| `std::thread`      | Runs the final aggregation logic independently.                                        |
+| `join()`           | Ensures the main thread waits until the final thread finishes.                         |
+
+### Why does the final thread wait for all futures?
+
+Consider:
+
+```
+int r1 = f1.get();
+int r2 = f2.get();
+int r3 = f3.get();
+```
+
+Each `get()` blocks only if its corresponding result is not ready. If Task 2 finishes before Task 1, its result is already available when the final thread reaches `f2.get()`.
+
+Important: The three computations execute concurrently, but the final thread retrieves their results sequentially. This does not mean the computations themselves run sequentially.
+
+### 4. Staff-level considerations
+
+- Exception handling: If a task throws an exception, its future propagates that exception through `get()`. Production code should handle exceptions
+so that one failed task does not prevent processing the other results.
+- Future ownership: A `std::future` returned by `std::async` is movable but not copyable. Capturing the futures by reference is safe here because `main()` 
+joins the final thread before the futures go out of scope.
+- Launch policy: Explicitly specifying `std::launch::async` avoids the possibility that `std::async` chooses deferred execution.
+- Thread safety: The tasks write to `std::cout` concurrently, so their output may interleave. That does not affect the computed results.
+
+
+For a MAANG Staff Engineer interview, the key change is to handle exceptions independently for each future, 
+rather than allowing an exception from one `get()` call to terminate the aggregation process.
+
+In the previous implementation, if `f1.get()` throws an exception, execution jumps out of the final thread's lambda, so `f2.get()` and `f3.get()` are never called.
+
+## 1. Updated C++ implementation
+
+This version collects every successful result, records failures, and continues processing the remaining futures.
+
+```
+
+#include <iostream>
+#include <future>
+#include <thread>
+#include <chrono>
+#include <vector>
+#include <exception>
+#include <optional>
+
+int computeValue(int id, int value)
+{
+    std::cout << "Task " << id << " started\n";
+
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(500 * id));
+
+    // Simulate a failure in Task 2
+    if (id == 2) {
+        throw std::runtime_error(
+            "Task 2 computation failed");
+    }
+
+    int result = value * value;
+
+    std::cout << "Task " << id
+              << " completed with result "
+              << result << '\n';
+
+    return result;
+}
+
+int main()
+{
+    auto f1 = std::async(
+        std::launch::async, computeValue, 1, 10);
+
+    auto f2 = std::async(
+        std::launch::async, computeValue, 2, 20);
+
+    auto f3 = std::async(
+        std::launch::async, computeValue, 3, 30);
+
+    std::thread finalThread([&]()
+    {
+        std::vector<int> successfulResults;
+        int failureCount = 0;
+
+        auto collect = [&](std::future<int>& future,
+                           int taskId)
+        {
+            try {
+                int result = future.get();
+                successfulResults.push_back(result);
+
+                std::cout << "Collected Task "
+                          << taskId << ": "
+                          << result << '\n';
+            }
+            catch (const std::exception& e) {
+                ++failureCount;
+
+                std::cout << "Task " << taskId
+                          << " failed: "
+                          << e.what() << '\n';
+            }
+            catch (...) {
+                ++failureCount;
+
+                std::cout << "Task " << taskId
+                          << " failed with an unknown exception\n";
+            }
+        };
+
+        // Each task is handled independently
+        collect(f1, 1);
+        collect(f2, 2);
+        collect(f3, 3);
+
+        int total = 0;
+
+        for (int result : successfulResults) {
+            total += result;
+        }
+
+        std::cout << "\nAll futures processed.\n";
+        std::cout << "Successful tasks: "
+                  << successfulResults.size() << '\n';
+        std::cout << "Failed tasks: "
+                  << failureCount << '\n';
+        std::cout << "Sum of successful results: "
+                  << total << '\n';
+    });
+
+    finalThread.join();
+
+    return 0;
+}
+
+```
+
+Compile using:
+
+```
+g++ -std=c++17 -pthread main.cpp -o main
+./main
+```
+
+## 2. Expected behavior
+
+Task 2 deliberately throws an exception. Tasks 1 and 3 still contribute their results.
+
+Task 1
+
+Success — result 100
+
+Task 2
+
+Failure — exception caught by final thread
+
+Task 3
+
+Success — result 900
+
+Final aggregate
+
+# 1,000
+
+2 successful tasks, 1 failed task
+
+The exact order of task start and completion messages may vary because the tasks run concurrently.
+
+## 3. Why this works
+
+The critical design is the independent `try`/`catch` inside `collect()`:
+
+```
+try {
+    int result = future.get();
+    successfulResults.push_back(result);
+}
+catch (const std::exception& e) {
+    ++failureCount;
+}
+```
+
+- `future.get()` waits for that task and retrieves its result.
+- If the task threw an exception, `get()` rethrows it in the calling thread.
+- The local `catch` handles that failure, so control returns to the caller.
+- The next `collect()` invocation still runs.
+- The final total includes only successful computations.
+
+One important detail: do not put all three `get()` calls inside a single `try` block if the requirement is to collect every successful result. 
+An exception from the first call would skip the remaining calls.
+
+## 4. Staff-level improvement: preserve task identity and errors
+
+For production-quality code, I would go a step further and store each result alongside its task ID and error information. This avoids losing the
+relationship between a result and its originating task, especially if results are later aggregated, retried, or reported to monitoring systems.
+
+Also note that this design waits for futures in a fixed order. If Task 1 takes a long time while Tasks 2 and 3 have already completed, their results won't
+be processed until the final thread reaches them. If low-latency result processing matters, consider a completion queue or a task pool that publishes results 
+as soon as each task finishes.
+
+Interview takeaway: Futures communicate both values and exceptions. Independent exception handling at each future boundary allows the aggregation stage to make
+progress despite individual task failures.
