@@ -1,0 +1,289 @@
+# Atomic Types in C++ — Staff Engineer Interview Guide
+
+In C++, atomic types are types that allow operations on shared data to happen atomically — as a single indivisible operation — making them useful for
+writing thread-safe code without necessarily using mutexes.
+
+The primary header is:
+
+```
+#include <atomic>
+```
+
+The most commonly used atomic type is `std::atomic<T>`, where `T` is a supported type such as `int`, `bool`, or a pointer.
+
+## 1. Why do we need atomic types?
+
+Consider two threads incrementing the same shared counter.
+
+Incorrect implementation — data race
+
+```
+#include <iostream>
+#include <thread>
+
+int counter = 0;
+
+void increment() {
+    for (int i = 0; i < 100000; ++i) {
+        counter++;
+    }
+}
+
+int main() {
+    std::thread t1(increment);
+    std::thread t2(increment);
+
+    t1.join();
+    t2.join();
+
+    std::cout << counter << '\n';
+}
+```
+
+You might expect `200000`, but this program has a data race, which means its behavior is undefined in C++. The increment operation consists of multiple steps:
+
+1. Read the current value.
+2. Add one.
+3. Write the updated value.
+
+Both threads can interfere with these steps.
+
+### Fix using `std::atomic`
+
+```
+#include <iostream>
+#include <thread>
+#include <atomic>
+
+std::atomic<int> counter{0};
+
+void increment() {
+    for (int i = 0; i < 100000; ++i) {
+        counter++;
+    }
+}
+
+int main() {
+    std::thread t1(increment);
+    std::thread t2(increment);
+
+    t1.join();
+    t2.join();
+
+    std::cout << counter.load() << '\n';
+}
+```
+
+Expected output:
+
+```
+200000
+```
+
+Here, `counter++` performs an atomic read-modify-write operation. Concurrent increments cannot overwrite each other's updates.
+
+## 2. Important atomic types in C++
+
+| Atomic type              | Purpose                                                                      | Example             |
+| ------------------------ | ---------------------------------------------------------------------------- | ------------------- |
+| `std::atomic<bool>`      | Thread-safe flag                                                             | Stop signal         |
+| `std::atomic<int>`       | Integer counter                                                              | Request count       |
+| `std::atomic<unsigned>`  | Unsigned counter                                                             | Event tracking      |
+| `std::atomic<T*>`        | Atomic pointer operations                                                    | Pointer publication |
+| `std::atomic<long long>` | 64-bit integer operations                                                    | Statistics counter  |
+| `std::atomic_flag`       | Atomic flag with guaranteed lock-free semantics                              | Spinlock            |
+| `std::atomic<T>`         | General supported trivially copyable types, subject to standard requirements | Custom state        |
+
+C++20 also provides `std::atomic_ref<T>`, which allows atomic operations on an existing object, provided its lifetime and alignment requirements are satisfied.
+
+Note that atomic does not automatically mean lock-free. Some atomic types or operations may use internal locks.
+
+## 3. Common operations on atomic variables
+
+Consider this example:
+
+```
+#include <atomic>
+#include <iostream>
+
+int main() {
+    std::atomic<int> value{10};
+
+    value.store(20);             // Write atomically
+
+    int x = value.load();        // Read atomically
+
+    int old = value.exchange(30); // Replace and return old value
+
+    int expected = 30;
+    bool success = value.compare_exchange_strong(
+        expected, 40
+    );
+
+    std::cout << "x = " << x << '\n';
+    std::cout << "old = " << old << '\n';
+    std::cout << "success = " << success << '\n';
+    std::cout << "value = " << value.load() << '\n';
+}
+```
+
+Output:
+
+```
+x = 20
+old = 20
+success = 1
+value = 40
+```
+
+The key operations are:
+
+- `load()` — atomically reads the value.
+- `store(value)` — atomically writes a value.
+- `exchange(value)` — replaces the value and returns the previous value.
+- `fetch_add(n)` — adds `n` and returns the previous value.
+- `fetch_sub(n)` — subtracts `n` and returns the previous value.
+- `compare_exchange_strong()` — updates the value only if it matches the expected value.
+- `compare_exchange_weak()` — similar, but may fail spuriously, so it is commonly used in retry loops.
+
+### `fetch_add()` versus `++`
+
+```
+std::atomic<int> count{10};
+
+int old = count.fetch_add(5);
+// old = 10, count = 15
+
+int current = ++count;
+// current = 16, count = 16
+```
+
+`fetch_add()` returns the old value, while prefix increment returns the new value.
+
+## 4. Atomic operations versus mutexes
+
+Atomic operations
+
+Useful for simple shared state such as counters, flags, and state transitions. They can reduce synchronization overhead, but are not guaranteed to be faster or lock-free.
+
+Mutexes
+
+Better suited to protecting multiple related variables, complex invariants, or a critical section containing several operations.
+
+For example, this is not an atomic increment:
+
+```
+std::atomic<int> count{0};
+
+count.store(count.load() + 1);
+```
+
+Although each `load()` and `store()` is individually atomic, the overall increment is not. Two threads can load the same value and store the same result, losing an increment.
+
+Use either:
+
+```
+count.fetch_add(1);
+```
+
+or:
+
+```
+++count;
+```
+
+## 5. Memory ordering — an important interview topic
+
+Atomic operations can specify how memory accesses are ordered across threads.
+
+| Memory order                | Meaning                                                                      |
+| --------------------------- | ---------------------------------------------------------------------------- |
+| `std::memory_order_relaxed` | Atomicity only; no synchronization of unrelated memory                       |
+| `std::memory_order_acquire` | Prevents subsequent operations from moving before the acquire                |
+| `std::memory_order_release` | Prevents preceding operations from moving after the release                  |
+| `std::memory_order_acq_rel` | Combines acquire and release semantics                                       |
+| `std::memory_order_seq_cst` | Sequentially consistent ordering; the default for ordinary atomic operations |
+
+Example of release-acquire synchronization:
+
+```
+#include <atomic>
+#include <thread>
+#include <iostream>
+
+int data = 0;
+std::atomic<bool> ready{false};
+
+void producer() {
+    data = 42;
+    ready.store(true, std::memory_order_release);
+}
+
+void consumer() {
+    while (!ready.load(std::memory_order_acquire)) {
+        // Wait until data is published.
+    }
+
+    std::cout << data << '\n';
+}
+
+int main() {
+    std::thread t1(producer);
+    std::thread t2(consumer);
+
+    t1.join();
+    t2.join();
+}
+```
+
+Output:
+
+```
+42
+```
+
+When the acquire load observes the value written by the release store, the producer's preceding write to `data` happens-before the consumer's subsequent read.
+Therefore, the non-atomic `data` access is safe in this example.
+
+Using `memory_order_relaxed` for the flag would not establish this synchronization, and accessing `data` this way could result in a data race.
+
+## 6. Is `std::atomic<T>` always lock-free?
+
+No. Check with:
+
+```
+std::atomic<int> value{0};
+
+if (value.is_lock_free()) {
+    std::cout << "Lock-free\n";
+} else {
+    std::cout << "May use internal locks\n";
+}
+```
+
+You can also use `std::atomic<T>::is_always_lock_free` when supported by the type and standard library.
+
+Remember these distinctions:
+
+- Atomicity: An operation cannot be observed as partially completed.
+- Lock-free: System-wide progress is guaranteed for lock-free operations, although an individual thread can starve.
+- Wait-free: Each operation completes in a bounded number of its own steps.
+
+These are different guarantees.
+
+## 7. Common staff-level interview questions
+
+1\. Can two threads safely increment std::atomic\<int>?Yes, using ++, fetch_add(), or another atomic read-modify-write operation.
+
+2\. Is count = count + 1 atomic?No. The read and write are individually atomic for an atomic object, but the combined operation is not one atomic read-modify-write operation.
+
+3\. Does atomic guarantee lock-free execution?No. Use is_lock_free() or is_always_lock_free to check the implementation's guarantee.
+
+4\. When should you use memory_order_relaxed?When atomicity is required but the variable does not need to synchronize other memory accesses, such as an independent statistics counter.
+
+5\. What is compare_exchange used for?It conditionally updates an atomic value and is a fundamental building block for lock-free algorithms and state transitions.
+
+6\. Can atomics replace every mutex?No. Complex invariants involving multiple objects and multi-step operations often need a mutex or a carefully designed atomic protocol.
+
+Interview takeaway: Understand the difference between atomic operations and compound operations, learn compare-and-exchange, and be able to explain acquire-release ordering. 
+These concepts matter much more than memorizing the list of atomic types.
