@@ -1,0 +1,132 @@
+A spinlock using `std::atomic_flag` can cause CPU starvation because a thread repeatedly checks the lock in a tight loop instead of sleeping or yielding the CPU.
+
+This is called busy-waiting. It can be especially problematic when a thread holds the lock for a long time or when a low-priority thread holds the
+lock while a high-priority thread spins waiting for it.
+
+## 1. Example: Spinlock using `atomic_flag`
+
+```
+#include <atomic>
+#include <iostream>
+#include <thread>
+#include <chrono>
+
+class SpinLock {
+    std::atomic_flag flag = ATOMIC_FLAG_INIT;
+
+public:
+    void lock() {
+        while (flag.test_and_set(std::memory_order_acquire)) {
+            // Busy-wait: repeatedly consumes CPU
+        }
+    }
+
+    void unlock() {
+        flag.clear(std::memory_order_release);
+    }
+};
+
+SpinLock spinlock;
+int shared_data = 0;
+
+void worker(int id) {
+    for (int i = 0; i < 1000; ++i) {
+        spinlock.lock();
+
+        // Simulate a long critical section
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(2));
+
+        ++shared_data;
+
+        spinlock.unlock();
+    }
+
+    std::cout << "Worker " << id << " finished\n";
+}
+
+int main() {
+    std::thread t1(worker, 1);
+    std::thread t2(worker, 2);
+    std::thread t3(worker, 3);
+    std::thread t4(worker, 4);
+
+    t1.join();
+    t2.join();
+    t3.join();
+    t4.join();
+
+    std::cout << "Final value: " << shared_data << '\n';
+}
+```
+
+The example deliberately sleeps inside the critical section to simulate a long-held lock. Using a spinlock around a sleeping operation is a 
+bad design because the waiting threads continue consuming CPU while the lock owner is asleep.
+
+## 2. How CPU starvation happens
+
+Thread T1 — lock owner
+
+Acquires the lock and enters the critical section. It sleeps for 2 ms while still holding the lock.
+
+Threads T2, T3 and T4 — waiting
+
+Each repeatedly executes `flag.test_and_set()`. The calls return `true` while the lock is held, so all three threads keep spinning.
+
+T1 releases the lock
+
+One waiting thread may acquire it, but there is no fairness guarantee. The other threads resume spinning.
+
+### What the CPU is doing
+
+```
+Time ──────────────────────────────────────────►
+
+T1:  [ Acquire ][ Critical section ........ ][Unlock]
+T2:  [ spin ][ spin ][ spin ][ spin ][ Acquire]
+T3:  [ spin ][ spin ][ spin ][ spin ][ spin  ]
+T4:  [ spin ][ spin ][ spin ][ spin ][ spin  ]
+
+CPU:   Useful work by T1 + wasted cycles by waiters
+```
+
+Three important consequences:
+
+1. CPU wastage: Waiting threads consume execution time without making progress.
+2. Starvation: A thread may repeatedly lose the race to acquire the lock because `atomic_flag` does not guarantee FIFO fairness. Under sustained contention, it can wait indefinitely.
+3. Priority inversion: On a priority-scheduled system, high-priority threads spinning can prevent a lower-priority lock owner from getting CPU time to release the lock. 
+This can make the problem much worse.
+
+Strictly speaking, busy-waiting alone does not guarantee starvation. Starvation depends on scheduling, contention and lock-acquisition fairness.
+
+## 3. A better approach: reduce spinning
+
+For a short critical section, a spinlock can be efficient. For longer waits, consider a mutex, which allows waiting threads to block rather than continuously consume CPU.
+
+For C++20, you can also use `atomic_flag::wait()`:
+
+```
+#include <atomic>
+
+class WaitableSpinLock {
+    std::atomic_flag flag = ATOMIC_FLAG_INIT;
+
+public:
+    void lock() {
+        while (flag.test_and_set(std::memory_order_acquire)) {
+            flag.wait(true, std::memory_order_relaxed);
+        }
+    }
+
+    void unlock() {
+        flag.clear(std::memory_order_release);
+        flag.notify_one();
+    }
+};
+```
+
+This reduces wasteful polling by allowing a contending thread to wait until the flag changes. However, it still does not guarantee fairness, and 
+it is not equivalent to a mutex with guaranteed scheduling behavior.
+
+Interview takeaway: `atomic_flag` makes the lock operation atomic; it does not make waiting fair or CPU-efficient. Spinlocks are best for very short 
+critical sections where the owner is expected to release the lock almost immediately.
