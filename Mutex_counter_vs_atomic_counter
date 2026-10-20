@@ -170,4 +170,5 @@ For a standalone counter, relaxed ordering is sufficient because we only need at
 Interview insight: An atomic counter is not necessarily lock-free on every platform, and it does not eliminate contention. When many CPU cores update the same atomic variable, 
 cache-line ownership transfers can become expensive.
 
-For a more reliable benchmark, repeat each test several times, compare median timings, and test different thread counts. Also consider a per-thread counter followed by aggregation: it can outperform both approaches when the workload permits independent counters.
+For a more reliable benchmark, repeat each test several times, compare median timings, and test different thread counts. Also consider a per-thread counter followed by aggregation: 
+it can outperform both approaches when the workload permits independent counters.
