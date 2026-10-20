@@ -1,0 +1,173 @@
+For a C++ staff-level interview, the best way to compare a mutex-based counter with an atomic counter is to run the same workload with multiple threads, 
+measure elapsed time using `std::chrono`, and verify that both implementations produce the correct final count.
+
+The key difference:
+
+- Mutex: protects the increment operation using locking and unlocking.
+- Atomic: uses `std::atomic::fetch_add()` to increment safely without an explicit mutex.
+- Performance: atomics often perform better for a simple counter, but contention, hardware, and memory ordering affect the result.
+
+## 1. Complete C++ benchmark
+
+This program compares both approaches using the same number of threads and increments.
+
+```
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <iostream>
+#include <mutex>
+#include <thread>
+#include <vector>
+#include <iomanip>
+
+using namespace std;
+using namespace std::chrono;
+
+constexpr int NUM_THREADS = 4;
+constexpr int64_t INCREMENTS_PER_THREAD = 5'000'000;
+
+// Mutex-based counter
+class MutexCounter {
+private:
+    int64_t count = 0;
+    mutex mtx;
+
+public:
+    void increment() {
+        lock_guard<mutex> lock(mtx);
+        ++count;
+    }
+
+    int64_t get() const {
+        // Call only after all worker threads have joined.
+        return count;
+    }
+};
+
+// Atomic-based counter
+class AtomicCounter {
+private:
+    atomic<int64_t> count{0};
+
+public:
+    void increment() {
+        count.fetch_add(1, memory_order_relaxed);
+    }
+
+    int64_t get() const {
+        return count.load(memory_order_relaxed);
+    }
+};
+
+// Measure the elapsed time of a workload
+template <typename Counter>
+double benchmark(Counter& counter) {
+    vector<thread> workers;
+    workers.reserve(NUM_THREADS);
+
+    auto start = steady_clock::now();
+
+    for (int i = 0; i < NUM_THREADS; ++i) {
+        workers.emplace_back([&counter]() {
+            for (int64_t j = 0;
+                 j < INCREMENTS_PER_THREAD; ++j) {
+                counter.increment();
+            }
+        });
+    }
+
+    for (auto& worker : workers) {
+        worker.join();
+    }
+
+    auto end = steady_clock::now();
+
+    return duration<double, milli>(end - start).count();
+}
+
+int main() {
+    MutexCounter mutexCounter;
+    AtomicCounter atomicCounter;
+
+    double mutexTime = benchmark(mutexCounter);
+    double atomicTime = benchmark(atomicCounter);
+
+    const int64_t expected =
+        NUM_THREADS * INCREMENTS_PER_THREAD;
+
+    cout << fixed << setprecision(2);
+
+    cout << "Threads: " << NUM_THREADS << '\n';
+    cout << "Expected count: " << expected << "\n\n";
+
+    cout << "Mutex counter:\n";
+    cout << "  Count = " << mutexCounter.get() << '\n';
+    cout << "  Time  = " << mutexTime << " ms\n\n";
+
+    cout << "Atomic counter:\n";
+    cout << "  Count = " << atomicCounter.get() << '\n';
+    cout << "  Time  = " << atomicTime << " ms\n\n";
+
+    cout << "Atomic speedup: "
+         << mutexTime / atomicTime << "x\n";
+
+    return 0;
+}
+
+```
+
+## 2. Compile and run
+
+On Ubuntu, save the code as `counter_benchmark.cpp` and execute:
+
+```
+g++ -O2 -std=c++17 -pthread counter_benchmark.cpp -o counter_benchmark
+./counter_benchmark
+```
+
+Example output (illustrative; actual results depend on your CPU):
+
+```
+Threads: 4
+Expected count: 20000000
+
+Mutex counter:
+  Count = 20000000
+  Time  = 4200.00 ms
+
+Atomic counter:
+  Count = 20000000
+  Time  = 1100.00 ms
+
+Atomic speedup: 3.82x
+```
+
+Both counters must produce exactly `20,000,000`. The times above are examples, not measured results from your machine.
+
+## 3. Why use `memory_order_relaxed`?
+
+```
+count.fetch_add(1, memory_order_relaxed);
+```
+
+For a standalone counter, relaxed ordering is sufficient because we only need atomicity of the increment, not synchronization of other memory accesses through the counter.
+
+- `memory_order_relaxed`: guarantees atomic modification of the counter without imposing additional ordering constraints.
+- Default `fetch_add(1)`: uses sequential consistency (`memory_order_seq_cst`), which provides stronger ordering guarantees and can have different performance.
+
+## 4. Important performance considerations
+
+| Factor               | Mutex counter                | Atomic counter                               |
+| -------------------- | ---------------------------- | -------------------------------------------- |
+| Thread safety        | Yes                          | Yes                                          |
+| Explicit lock/unlock | Yes                          | No                                           |
+| Contention           | Threads wait for the lock    | Threads contend for the same atomic variable |
+| Scalability          | Lock overhead and contention | Cache-line contention can limit scalability  |
+| Guaranteed lock-free | No                           | No                                           |
+
+Interview insight: An atomic counter is not necessarily lock-free on every platform, and it does not eliminate contention. When many CPU cores update the same atomic variable, 
+cache-line ownership transfers can become expensive.
+
+For a more reliable benchmark, repeat each test several times, compare median timings, and test different thread counts. Also consider a per-thread counter followed by aggregation: it can outperform both approaches when the workload permits independent counters.
