@@ -1,0 +1,100 @@
+constexpr (constant expression) is a powerful C++ keyword introduced in C++11 that indicates an expression, variable, or function can be evaluated at compile time.
+[1] (https://www.geeksforgeeks.org/cpp/understanding-constexper-specifier-in-cpp/), [2] (https://en.cppreference.com/cpp/language/constexpr)
+By shifting computations from runtime to compile time, constexpr eliminates runtime performance overhead, reduces binary sizes, and enables cleaner template programming. 
+[1] (https://www.reddit.com/r/cpp_questions/comments/16erge2/can_someone_please_explain_constexpr/), [2] (https://www.youtube.com/watch?v=ymbRRQwLzIs&t=411),
+[3] (https://stackoverflow.com/questions/27473795/what-are-constexpr-useful-for)
+
+1. constexpr Variables
+
+When applied to a variable, constexpr guarantees that the value is computed at compile time. The initializer itself must be a constant expression. 
+[1] (https://en.cppreference.com/cpp/language/constexpr), [2] (https://www.geeksforgeeks.org/cpp/understanding-constexper-specifier-in-cpp/)
+cpp
+constexpr int max_users = 100;                 // Evaluated at compile time
+constexpr int double_users = max_users * 2;    // Evaluated at compile time
+
+int arr[max_users];                            // Legal! Array size requires a compile-time constant
+Use code with caution.
+
+constexpr vs const
+
+While they seem similar, they serve different purposes: [1] (https://www.geeksforgeeks.org/cpp/understanding-constexper-specifier-in-cpp/)
+• const: Means "read-only" at runtime. Its value can be assigned using a runtime variable (e.g., user input), meaning it isn't guaranteed to be known at compile time.
+• constexpr: Means "constant expression". It is explicitly a compile-time constant and is implicitly const. 
+[1] (https://learn.microsoft.com/en-us/cpp/cpp/constexpr-cpp?view=msvc-170), 
+[2] (https://www.geeksforgeeks.org/cpp/understanding-constexper-specifier-in-cpp/), 
+[3] (https://stackoverflow.com/questions/14116003/whats-the-difference-between-constexpr-and-const), 
+[4] (https://en.cppreference.com/cpp/language/constexpr)
+
+2. constexpr Functions
+
+A constexpr function is a function that can run at compile time if all its arguments are constant expressions. If the arguments are runtime variables, 
+it automatically behaves like a normal runtime function. [1] (https://medium.com/@sagar.necindia/cpp-constexpr-functions-6b78182e68bc)
+cpp
+constexpr int multiply(int a, int b) {
+    return a * b;
+}
+
+int main() {
+    // 1. Evaluated at COMPILE TIME because arguments are literals
+    constexpr int compile_time_val = multiply(5, 10); 
+
+    // 2. Evaluated at RUNTIME because arguments are user-driven
+    int x, y;
+    std::cin >> x >> y;
+    int runtime_val = multiply(x, y); 
+}
+Use code with caution.
+
+Rules & Evolution of constexpr Functions
+
+The restrictions on what you can write inside a constexpr function have loosened significantly over time: 
+[1] (https://stackoverflow.com/questions/27473795/what-are-constexpr-useful-for), [2] (https://pvs-studio.com/en/blog/posts/cpp/0909/)
+• C++11: Highly restrictive. The function body could only contain a single return statement. No loops, if statements, or local variables were allowed. 
+[1] (https://www.geeksforgeeks.org/cpp/understanding-constexper-specifier-in-cpp/), [2] (https://medium.com/@sagar.necindia/cpp-constexpr-functions-6b78182e68bc)
+• C++14 onwards: Relaxed rules. You can now use loops (for, while), local variables, and if-else branches inside the function. 
+[1] (https://pvs-studio.com/en/blog/posts/cpp/0909/), [2] (https://stackoverflow.com/questions/27473795/what-are-constexpr-useful-for), 
+[3] (https://www.geeksforgeeks.org/cpp/understanding-constexper-specifier-in-cpp/)
+• C++20 onwards: You can even use dynamic memory allocation (like std::vector or std::string) inside a constexpr context, provided the memory 
+is deallocated before the compile-time evaluation finishes. [1] (https://pvs-studio.com/en/blog/posts/cpp/0909/)
+
+3. if constexpr (C++17)
+
+Introduced in C++17, if constexpr allows compile-time branching. The compiler evaluates the condition at compile time and only compiles the branch that evaluates to true. 
+The unused branch is completely discarded and does not generate code. [1] (https://www.reddit.com/r/cpp_questions/comments/16erge2/can_someone_please_explain_constexpr/), 
+[2] (https://pvs-studio.com/en/blog/posts/cpp/0909/)
+This is highly useful in templates to replace complex SFINAE (Substitution Failure Is Not An Error) boilerplate: 
+[1] (https://www.reddit.com/r/cpp_questions/comments/16erge2/can_someone_please_explain_constexpr/)
+cpp
+template <typename T>
+void process(T val) {
+    if constexpr (std::is_integral_v<T>) {
+        // Compiled ONLY if T is an integer type (int, long, etc.)
+        std::cout << "Integer: " << val << '\n';
+    } else {
+        // Compiled ONLY if T is anything else (string, float, etc.)
+        std::cout << "Non-integer value\n";
+    }
+}
+Use code with caution.
+
+4. Comparison of Constant Keywords
+
+
+Specifier	Evaluated At	Can be used for Array Size/Templates?	Purpose
+const	Runtime (usually) or Compile time	Only if initialized with a constant literal	Read-only object variable
+constexpr	Compile time	Yes (Guaranteed)	True compile-time constant expression
+consteval (C++20)	Compile time only	Yes	Immediate function (must always produce a compile-time constant; fails if called with runtime parameters)
+
+
+Key Benefits 🚀
+
+1. Performance: Shifting mathematical conversions, lookup tables, and configuration hashes from runtime to compile time makes the executable faster.
+2. Safety: Errors in computation or constraints are caught by the compiler rather than crashing at runtime.
+3. Readability: Replaces ugly preprocessor macros (#define) with type-safe C++ code. 
+[1] (https://stackoverflow.com/questions/14116003/whats-the-difference-between-constexpr-and-const), 
+[2] (https://www.reddit.com/r/cpp_questions/comments/16erge2/can_someone_please_explain_constexpr/), 
+[3] (https://www.geeksforgeeks.org/cpp/understanding-constexper-specifier-in-cpp/), 
+[4] (https://www.youtube.com/watch?v=ymbRRQwLzIs&t=411), 
+[5] (https://medium.com/@eshafeeqe/constexpr-benefits-in-c-6664c45cba4d),
+[6] (https://stackoverflow.com/questions/27473795/what-are-constexpr-useful-for)
+Would you like to see a complete code example of how to implement a constexpr custom constructor/class, or are you looking to understand how to use constexpr alongside std::array or string hashing? Let me know what you'd like to dive into next! [1] (https://iamsorush.com/posts/cpp-constexpr/), [2] (https://www.geeksforgeeks.org/cpp/understanding-constexper-specifier-in-cpp/), [3] (https://www.reddit.com/r/cpp_questions/comments/16erge2/can_someone_please_explain_constexpr/)
