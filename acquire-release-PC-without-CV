@@ -1,0 +1,110 @@
+In C++, you can implement a producer–consumer pattern without a condition variable using `std::atomic` with `memory_order_release` and `memory_order_acquire`.
+
+The producer writes data into a shared buffer and publishes it using a release store. 
+The consumer waits until the data is published using an acquire load, then safely reads the buffer.
+
+## 1. Producer–consumer using acquire/release
+
+This example uses a single producer and a single consumer with a one-slot buffer. It uses atomic flags for synchronization and no mutex or condition variable.
+
+```
+#include <iostream>
+#include <thread>
+#include <atomic>
+#include <string>
+
+std::string buffer;
+std::atomic<bool> ready{false};
+
+void producer()
+{
+    buffer = "Hello from Producer";
+
+    // Publish the buffer contents
+    ready.store(true, std::memory_order_release);
+
+    std::cout << "Producer: Data published\n";
+}
+
+void consumer()
+{
+    // Wait until the producer publishes the data
+    while (!ready.load(std::memory_order_acquire)) {
+        // Busy-wait (spin)
+    }
+
+    std::cout << "Consumer received: " << buffer << '\n';
+}
+
+int main()
+{
+    std::thread p(producer);
+    std::thread c(consumer);
+
+    p.join();
+    c.join();
+
+    return 0;
+}
+```
+
+Possible output:
+
+```
+Producer: Data published
+Consumer received: Hello from Producer
+```
+
+## 2. How acquire/release ordering works
+
+Producer thread
+
+`buffer = "Hello from Producer";`
+
+Writes shared data
+
+Release
+
+`ready.store(true, memory_order_release)`
+
+Synchronization
+
+The buffer write happens-before the consumer's subsequent read, provided the acquire load observes the release store.
+
+Acquire
+
+`ready.load(memory_order_acquire)`
+
+Consumer thread
+
+`std::cout << buffer;`
+
+Reads the published data safely
+
+### Why these memory orders matter
+
+- `memory_order_release`: Ensures preceding writes in the producer are published before its release store.
+- `memory_order_acquire`: Ensures subsequent reads in the consumer cannot move before the acquire load in a way that breaks synchronization.
+- Synchronizes-with: When the acquire load reads the value written by the release store (or its release sequence), the producer's 
+  preceding writes happen-before the consumer's subsequent reads.
+
+Using `memory_order_relaxed` for both operations would not establish this synchronization, so accessing the non-atomic buffer could cause a data race.
+
+## 3. Important limitation: busy-waiting
+
+The consumer repeatedly checks `ready` in a loop. This is called busy-waiting or spinning.
+
+For a one-time handoff, it demonstrates acquire/release correctly. However, for a repeated producer–consumer queue, you need additional synchronization to handle buffer reuse, 
+prevent overwriting unread data, and avoid missed handoffs.
+
+## 4. Staff-level interview takeaway
+
+| Concept        | Explanation                                                          |
+| -------------- | -------------------------------------------------------------------- |
+| Release        | Publishes preceding writes                                           |
+| Acquire        | Makes published writes visible to the reader                         |
+| Atomic flag    | Synchronizes access to otherwise non-atomic data                     |
+| Spin loop      | Avoids condition variables but consumes CPU while waiting            |
+| Single handoff | Works for this example; repeated transfers require a proper protocol |
+
+Interview follow-up: To turn this into a reusable single-slot producer–consumer buffer, use two atomic flags: one to indicate the slot is full and another to indicate it is empty. Both producer and consumer must use the appropriate acquire/release operations when transferring ownership of the slot.
