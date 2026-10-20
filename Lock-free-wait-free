@@ -1,0 +1,160 @@
+The key difference is lock-free guarantees system-wide progress, whereas wait-free guarantees progress for every individual thread within a bounded number of steps.
+
+Both are non-blocking concurrency techniques used in C++, typically with atomic operations such as `compare_exchange_weak()` and `compare_exchange_strong()`.
+
+## 1. Core difference
+
+Lock-free
+
+System-wide progress
+
+At least one thread completes its operation in a finite number of steps, even if other threads are delayed or repeatedly fail.
+
+Individual threads may starve or retry indefinitely.
+
+Wait-free
+
+Per-thread progress
+
+Every thread completes its operation in a bounded number of its own steps, regardless of the execution speed or interference of other threads.
+
+No thread can be indefinitely postponed by contention.
+
+## 2. Understand with an example
+
+Imagine two threads trying to increment a shared atomic counter.
+
+A typical lock-free implementation might use a compare-and-exchange loop:
+
+```
+#include <atomic>
+
+std::atomic<int> counter{0};
+
+void increment() {
+    int old_value = counter.load();
+
+    while (!counter.compare_exchange_weak(
+        old_value, old_value + 1)) {
+        // Retry if another thread changed the counter.
+    }
+}
+```
+
+How it works:
+
+1. Thread A reads `counter = 0`.
+2. Thread B also reads `counter = 0`.
+3. Thread A successfully changes `0` to `1`.
+4. Thread B's attempt to change `0` to `1` fails because the counter is now `1`.
+5. Thread B retries and attempts to change `1` to `2`.
+
+Thread B might repeatedly lose the race to other threads. However, if other threads keep succeeding, the system continues making progress.
+
+That is the lock-free guarantee.
+
+A wait-free implementation must additionally ensure that every thread finishes in a bounded number of its own steps. Simply adding a retry limit to this loop would not achieve 
+that: a failed thread still needs a correct way to complete its increment.
+
+## 3. Comparison table
+
+| Property                     | Lock-free                        | Wait-free                                 |
+| ---------------------------- | -------------------------------- | ----------------------------------------- |
+| Progress guarantee           | At least one operation completes | Every operation completes                 |
+| Individual starvation        | Possible                         | Prevented by the algorithm                |
+| Retry loops                  | Allowed                          | May exist only if total steps are bounded |
+| Response-time predictability | Not guaranteed per thread        | Bounded algorithmic step count            |
+| Implementation difficulty    | Usually challenging              | Generally harder                          |
+| Performance under contention | Often good                       | Depends on the algorithm and workload     |
+| Relationship                 | Weaker guarantee                 | Stronger guarantee                        |
+
+Important: Wait-free implies lock-free in the standard progress-guarantee sense, but lock-free does not imply wait-free.
+
+## 4. Visualizing the difference
+
+### Lock-free execution
+
+Operations can finish unevenly; one thread may keep retrying.
+
+Thread A
+
+Complete ✓
+
+Complete ✓
+
+Complete ✓
+
+Thread B
+
+Retry ↻
+
+Retry ↻
+
+Retry ↻
+
+### Wait-free execution
+
+Each thread has a bounded completion guarantee.
+
+Thread A
+
+Complete ✓
+
+Complete ✓
+
+Thread B
+
+Complete ✓
+
+Complete ✓
+
+These diagrams illustrate the progress guarantees, not a requirement that threads execute simultaneously or finish at the same time.
+
+## 5. Where does obstruction-free fit?
+
+There are three commonly discussed non-blocking progress guarantees:
+
+| Guarantee        | Minimum condition for progress                                      |
+| ---------------- | ------------------------------------------------------------------- |
+| Obstruction-free | A thread completes if it eventually runs alone without interference |
+| Lock-free        | The system keeps completing operations under contention             |
+| Wait-free        | Every thread completes in a bounded number of its own steps         |
+
+Their guarantees become progressively stronger:
+
+\\[ \text{Wait-free} \Rightarrow \text{Lock-free} \Rightarrow \text{Obstruction-free} \\]
+
+The reverse implications do not generally hold.
+
+## 6. What about C++ atomics?
+
+A crucial distinction for C++ interviews: using `std::atomic` does not automatically make an algorithm lock-free or wait-free.
+
+For example:
+
+```
+std::atomic<int> counter{0};
+
+counter.fetch_add(1, std::memory_order_relaxed);
+```
+
+This performs an atomic increment, but the C++ standard does not guarantee that every atomic type is implemented lock-free on every platform. You can check the implementation with:
+
+```
+bool is_lock_free = counter.is_lock_free();
+```
+
+Even if `fetch_add()` is lock-free on your platform, that does not automatically make your entire algorithm wait-free. Algorithm-level progress guarantees must be analyzed separately.
+
+Also, wait-free means a bounded number of algorithmic steps, not a guaranteed wall-clock completion time. An operating system could deschedule a thread, and hardware delays can 
+still affect elapsed time.
+
+## 7. When should you use each?
+
+- Lock-free: Concurrent queues, stacks, counters, and other high-contention structures where system-wide progress and avoiding blocking are important.
+- Wait-free: Real-time or latency-sensitive systems where every participating thread needs a bounded algorithmic completion guarantee, assuming the required execution model.
+- Mutex-based synchronization: Often the simplest and most maintainable option when non-blocking progress is not a strict requirement.
+
+For your C++ multithreading and concurrency interview preparation, remember this one-line answer:
+
+> Lock-free prevents the entire system from getting stuck; wait-free prevents any individual thread from being perpetually denied progress by the algorithm.
