@@ -1,0 +1,244 @@
+Full working C++17 example
+This is a complete thread pool with:
+- Multiple worker threads.
+- A shared task queue.
+- submit() supporting return values of different types.
+- std::packaged_task and std::future.
+- Exception propagation from worker threads to the submitting thread.
+- Graceful shutdown that finishes queued tasks before exiting.
+
+
+
+#include <condition_variable>
+#include <exception>
+#include <functional>
+#include <future>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <stdexcept>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+class ThreadPool {
+public:
+    explicit ThreadPool(std::size_t n) : stop_(false) {
+        if (n == 0) {
+            throw std::invalid_argument(
+                "ThreadPool needs at least one worker");
+        }
+
+        for (std::size_t i = 0; i < n; ++i) {
+            workers_.emplace_back([this] {
+                worker_loop();
+            });
+        }
+    }
+
+    // Prevent copying a pool.
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool& operator=(const ThreadPool&) = delete;
+
+    // Submit a zero-argument callable and obtain its result.
+    template <typename F>
+    auto submit(F&& f)
+        -> std::future<std::invoke_result_t<F>>
+    {
+        using R = std::invoke_result_t<F>;
+
+        auto task =
+            std::make_shared<std::packaged_task<R()>>(
+                std::forward<F>(f));
+
+        std::future<R> fut = task->get_future();
+
+        {
+            std::lock_guard<std::mutex> lock(m_);
+
+            if (stop_) {
+                throw std::runtime_error(
+                    "Cannot submit to a stopped ThreadPool");
+            }
+
+            tasks_.push([task] {
+                (*task)();
+            });
+        }
+
+        cv_.notify_one();
+        return fut;
+    }
+
+    ~ThreadPool() {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            stop_ = true;
+        }
+
+        cv_.notify_all();
+
+        // Wait for workers to finish queued work and exit.
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+    }
+
+private:
+    void worker_loop() {
+        while (true) {
+            std::function<void()> task;
+
+            {
+                std::unique_lock<std::mutex> lock(m_);
+
+                cv_.wait(lock, [this] {
+                    return stop_ || !tasks_.empty();
+                });
+
+                // Exit only after the queue has been drained.
+                if (stop_ && tasks_.empty()) {
+                    return;
+                }
+
+                task = std::move(tasks_.front());
+                tasks_.pop();
+            }
+
+            // Execute outside the queue mutex.
+            task();
+        }
+    }
+
+    std::vector<std::thread> workers_;
+    std::queue<std::function<void()>> tasks_;
+
+    std::mutex m_;
+    std::condition_variable cv_;
+    bool stop_;
+};
+
+int main() {
+    ThreadPool pool(3);
+
+    // Task 1: returns int
+    auto f1 = pool.submit([] {
+        std::cout << "Task 1 running on thread "
+                  << std::this_thread::get_id() << '\n';
+        return 10 + 20;
+    });
+
+    // Task 2: returns a string
+    auto f2 = pool.submit([] {
+        return std::string("Hello from worker");
+    });
+
+    // Task 3: returns void
+    auto f3 = pool.submit([] {
+        std::cout << "Task 3: processing completed\n";
+    });
+
+    // Task 4: throws an exception
+    auto f4 = pool.submit([]() -> int {
+        throw std::runtime_error("Calculation failed");
+    });
+
+    // The tasks can execute concurrently.
+    // get() waits for each corresponding result.
+    std::cout << "Result 1: " << f1.get() << '\n';
+    std::cout << "Result 2: " << f2.get() << '\n';
+
+    f3.get(); // Wait for the void task to complete.
+
+    try {
+        int result = f4.get();
+        std::cout << "Result 4: " << result << '\n';
+    } catch (const std::exception& e) {
+        std::cout << "Task 4 exception: "
+                  << e.what() << '\n';
+    }
+
+    return 0;
+}
+
+
+
+Example output (the order of task execution can vary):
+
+Task 1 running on thread 140...
+Task 3: processing completed
+Result 1: 30
+Result 2: Hello from worker
+Task 4 exception: Calculation failed
+
+The thread ID and ordering are not deterministic. In particular, task output can interleave with the main thread's output.
+
+What happens internally when you call submit()?
+Consider:
+
+auto future = pool.submit([] {
+    return 100;
+});
+
+std::cout << future.get();
+
+The sequence is:
+1. Main thread: calls submit() with a lambda that returns 100.
+2. Task creation: the lambda is wrapped in a std::packaged_task<int()>.
+3. Future creation: get_future() returns a future associated with that task's shared state.
+4. Queue insertion: a lambda capturing the shared_ptr is inserted into tasks_ under the mutex.
+5. Worker notification: notify_one() wakes a waiting worker.
+6. Worker execution: the worker removes the queued lambda, releases the mutex, and invokes (*task)().
+7. Result storage: the packaged task executes the original lambda and stores 100 in its shared state.
+8. Result retrieval: future.get() returns 100. If the task throws an exception instead, get() rethrows it in the calling thread.
+The main thread and worker thread coordinate through the future's shared state, so you don't need to create your own result variable protected by a mutex.
+
+Why not simply use std::function<void()>?
+A thread pool commonly declares its queue as:
+
+std::queue<std::function<void()>> tasks_;
+
+This queue is designed to execute tasks, not directly collect their return values.
+
+Compare the two approaches:
+Feature	                                                    std::function<void()> alone	                                                 std::packaged_task<R()>
+Execute a task	                                                 Yes	                                                                       Yes
+Return result through a future	                               No, not by itself	                                                           Yes
+Propagate task exceptions through future.get()	               No, not by itself	                                                           Yes
+Store different task return types in one void() queue	         Yes, if wrapped in a void callable	                                           Yes, through a wrapper lambda
+
+For example, a simple queue insertion like this discards the result:
+tasks_.push([] {
+    int result = 10 + 20;
+    // Result is not available to the submitter.
+});
+
+With a packaged task, the result is connected to a future:
+
+auto task = std::make_shared<std::packaged_task<int()>>(
+    [] { return 10 + 20; }
+);
+
+auto future = task->get_future();
+
+tasks_.push([task] {
+    (*task)();
+});
+
+int result = future.get(); // 30
+
+The queue still holds a void() callable, but the packaged task preserves the actual result.
+
+Important details for interviews
+- std::packaged_task vs std::promise: A packaged task automatically executes a callable and stores its result. A promise lets you set the result manually.
+- std::future::get() vs wait(): get() waits and retrieves the value, whereas wait() waits without retrieving it.
+- Exception safety: Exceptions thrown by the submitted callable are stored in the packaged task's shared state and rethrown by future.get().
+  They do not normally escape the worker's task() invocation.
+- Lock scope: The worker must release the queue mutex before executing a task. Otherwise, a long-running task could block other workers from retrieving queued tasks.
+- Argument support: This implementation accepts only zero-argument callables. To submit a function with arguments, capture them in a lambda 
+  or extend the template to use std::packaged_task<R()> with std::bind or a lambda wrapper.
+Staff-level interview takeaway: std::packaged_task separates where a task executes from where its result is consumed. The worker owns execution; the submitting thread owns the future and decides when to wait for the result.
