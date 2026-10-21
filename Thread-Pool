@@ -1,0 +1,146 @@
+#include <condition_variable>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <utility>
+#include <vector>
+
+class ThreadPool {
+public:
+    explicit ThreadPool(size_t n) : stop_(false) {
+        for (size_t i = 0; i < n; ++i) {
+            workers_.emplace_back([this] {
+                worker_loop();
+            });
+        }
+    }
+
+    ~ThreadPool() {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            stop_ = true;
+        }
+
+        cv_.notify_all();
+
+        for (auto& t : workers_) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+    }
+
+    template <typename F>
+    void enqueue(F&& f) {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+
+            if (stop_) {
+                throw std::runtime_error("ThreadPool is stopping");
+            }
+
+            tasks_.emplace(std::forward<F>(f));
+        }
+
+        cv_.notify_one();
+    }
+
+private:
+    void worker_loop() {
+        while (true) {
+            std::function<void()> task;
+
+            {
+                std::unique_lock<std::mutex> lock(m_);
+
+                cv_.wait(lock, [this] {
+                    return stop_ || !tasks_.empty();
+                });
+
+                if (stop_ && tasks_.empty()) {
+                    return;
+                }
+
+                task = std::move(tasks_.front());
+                tasks_.pop();
+            }
+
+            try {
+                task();
+            } catch (const std::exception& e) {
+                std::cerr << "Task failed: " << e.what() << '\n';
+            } catch (...) {
+                std::cerr << "Task failed with an unknown exception\n";
+            }
+        }
+    }
+
+    std::vector<std::thread> workers_;
+    std::queue<std::function<void()>> tasks_;
+    std::mutex m_;
+    std::condition_variable cv_;
+    bool stop_;
+};
+
+int main() {
+    ThreadPool pool(3);
+
+    for (int i = 0; i < 8; ++i) {
+        pool.enqueue([i] {
+            std::cout << "Task " << i
+                      << " running on thread "
+                      << std::this_thread::get_id()
+                      << '\n';
+        });
+    }
+
+    // The pool destructor runs here and drains pending tasks.
+}
+
+
+This version adds a few safeguards:
+- enqueue() rejects new tasks after shutdown begins.
+- Exceptions from individual tasks are caught so that one throwing task does not terminate the process.
+- <stdexcept> should also be included for std::runtime_error.
+The output order is not deterministic because multiple worker threads execute concurrently.
+
+O/p-
+
+Task Task 0 running on thread 1366069650572161 running on thread 136606981842624
+Task 3 running on thread 136606965057216
+Task 4 running on thread 136606965057216
+Task 5 running on thread 136606965057216
+Task 2 running on thread 136606973449920
+
+Task 7 running on thread 136606973449920
+Task 6 running on thread 136606965057216
+
+
+Concurrency guarantees and limitations
+Concern	                                                                                               Current design
+Concurrent access to the task queue	                                                                   Protected by a mutex
+Idle worker CPU usage	                                                                                 Sleeps using a condition variable
+Parallel task execution	                                                                               Yes, up to the number of workers
+Graceful shutdown	                                                                                     Yes, drains queued work
+Task completion order	                                                                                 Not guaranteed
+Returning task results	                                                                               Not supported directly
+Waiting for a particular task	                                                                         Not supported directly
+Task exceptions	                                                                                       Uncaught exceptions terminate the process unless handled
+Enqueue during destruction	                                                                           Not safe if another thread concurrently destroys the pool and calls enqueue()
+
+One additional issue: if a task tries to destroy its own pool, the destructor may attempt to join the current worker thread, which is invalid. 
+The pool should be destroyed from an appropriate external thread after callers have stopped submitting work.
+
+Interview-level takeaways
+For a C++ concurrency interview, focus on these five principles:
+1. Mutex: protects shared state, especially the task queue and shutdown flag.
+2. Condition variable: blocks idle workers without busy-waiting.
+3. Predicate-based wait: handles spurious wakeups and checks the actual shared state.
+4. Unlock before execution: avoids serializing all task execution behind the queue mutex.
+5. Shutdown and join: ensures worker threads finish before the pool's resources are destroyed.
+The key design pattern is: lock → wait → dequeue → unlock → execute → repeat.
+
+That pattern is widely used in thread pools, background job executors, and producer-consumer systems.
+
