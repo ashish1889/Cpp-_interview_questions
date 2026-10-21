@@ -1,0 +1,265 @@
+# Parallel Algorithms in C++
+
+Parallel algorithms in C++ divide a computational task into smaller parts that can execute concurrently on multiple CPU cores. 
+They are useful for improving performance in data processing, image processing, sorting, searching, simulations, and large-scale computations.
+
+For modern C++, the most important concepts are `std::thread`, `std::async`, `std::execution`, parallel reduction, task scheduling, and avoiding data races.
+
+## 1. Types of parallel algorithms
+
+Data parallelism
+
+Split a large dataset into chunks and process each chunk concurrently.
+
+Example: summing 10 million integers.
+
+Task parallelism
+
+Execute independent tasks concurrently.
+
+Example: parsing a file while processing network data.
+
+Divide and conquer
+
+Recursively split a problem, solve subproblems in parallel, and combine their results.
+
+Example: parallel merge sort.
+
+Parallel reduction
+
+Compute partial results concurrently and combine them into one result.
+
+Example: sum, minimum, maximum, or histogram.
+
+## 2. Parallel execution with C++17 standard algorithms
+
+C++17 introduced execution policies in `<execution>`, which let you request different execution behavior for standard algorithms.
+
+| Execution policy            | Meaning                                       |
+| --------------------------- | --------------------------------------------- |
+| `std::execution::seq`       | Sequential execution                          |
+| `std::execution::par`       | Parallel execution may be used                |
+| `std::execution::par_unseq` | Parallel and vectorized execution may be used |
+| `std::execution::unseq`     | Unsequenced/vectorized execution, since C++20 |
+
+The policy does not guarantee a speedup or a particular number of threads. Library implementation and platform support matter.
+
+### Example: parallel sum
+
+```
+#include <execution>
+#include <iostream>
+#include <numeric>
+#include <vector>
+
+int main() {
+    std::vector<int> data(1'000'000, 1);
+
+    long long sum = std::reduce(
+        std::execution::par,
+        data.begin(),
+        data.end(),
+        0LL
+    );
+
+    std::cout << "Sum = " << sum << '\n';
+}
+```
+
+Output:
+
+```
+Sum = 1000000
+```
+
+How it works:
+
+1. The algorithm is allowed to divide the input into subranges.
+2. Partial sums can be computed in parallel.
+3. The partial sums are combined into the final result.
+
+Important: `std::reduce` may combine elements in an unspecified order. Its operation should therefore be suitable for regrouping; floating-point sums,
+for example, may produce slightly different results than sequential accumulation.
+
+Compile using a C++17-capable compiler:
+
+```
+g++ -std=c++17 -O2 -pthread parallel_sum.cpp -o parallel_sum
+```
+
+Some standard library implementations may require an additional backend library for parallel execution. Check your compiler and standard 
+library documentation if the policy does not actually run in parallel.
+
+## 3. Data parallelism using `std::thread`
+
+Let's implement parallel summation manually. This demonstrates the core idea behind many parallel algorithms.
+
+```
+#include <iostream>
+#include <numeric>
+#include <thread>
+#include <vector>
+#include <algorithm>
+
+int main() {
+    const size_t N = 1'000'000;
+    const size_t numThreads = 4;
+
+    std::vector<int> data(N, 1);
+    std::vector<long long> partialSums(numThreads, 0);
+    std::vector<std::thread> threads;
+
+    size_t chunkSize = (N + numThreads - 1) / numThreads;
+
+    for (size_t t = 0; t < numThreads; ++t) {
+        size_t start = t * chunkSize;
+        size_t end = std::min(start + chunkSize, N);
+
+        threads.emplace_back([&, t, start, end]() {
+            partialSums[t] = std::accumulate(
+                data.begin() + start,
+                data.begin() + end,
+                0LL
+            );
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    long long total = std::accumulate(
+        partialSums.begin(),
+        partialSums.end(),
+        0LL
+    );
+
+    std::cout << "Total = " << total << '\n';
+}
+```
+
+### Why this implementation is thread-safe
+
+- Each thread reads a different portion of `data`.
+- Each thread writes to a different `partialSums[t]` element.
+- `join()` ensures all worker threads finish before the final sum is calculated.
+- No mutex is needed for the partial sums because each thread owns a separate element.
+
+This approach is useful for understanding parallel reduction. For production code, consider hardware concurrency, task overhead, 
+workload balance, and whether a thread pool would be more efficient.
+
+## 4. Parallel merge sort
+
+Merge sort is a classic divide-and-conquer algorithm that can exploit multiple cores.
+
+Original array
+
+[8, 3, 7, 1, 6, 2, 5, 4]
+
+Left half
+
+[8, 3, 7, 1]
+
+Right half
+
+[6, 2, 5, 4]
+
+Sort concurrently
+
+[1, 3, 7, 8]
+
+Sort concurrently
+
+[2, 4, 5, 6]
+
+Merge the sorted halves
+
+[1, 2, 3, 4, 5, 6, 7, 8]
+
+The basic algorithm is:
+
+1. Divide the array into two halves.
+2. Sort the halves concurrently.
+3. Merge the sorted halves.
+4. Stop creating tasks when the subarray becomes small enough.
+
+A crucial optimization is to limit parallel recursion. Creating a new thread for every recursive call can make the algorithm slower because thread creation 
+and scheduling have costs. A practical implementation uses a thread pool or `std::async` with a depth or size threshold.
+
+## 5. Task parallelism using `std::async`
+
+Use `std::async` when two or more independent computations can run concurrently and return values.
+
+```
+#include <future>
+#include <iostream>
+#include <numeric>
+#include <vector>
+
+long long sumRange(const std::vector<int>& data,
+                   size_t begin, size_t end) {
+    return std::accumulate(
+        data.begin() + begin,
+        data.begin() + end,
+        0LL
+    );
+}
+
+int main() {
+    std::vector<int> data(1'000'000, 1);
+    size_t mid = data.size() / 2;
+
+    auto left = std::async(
+        std::launch::async,
+        sumRange,
+        std::cref(data), 0, mid
+    );
+
+    auto right = std::async(
+        std::launch::async,
+        sumRange,
+        std::cref(data), mid, data.size()
+    );
+
+    long long total = left.get() + right.get();
+
+    std::cout << "Total = " << total << '\n';
+}
+```
+
+`std::launch::async` requests asynchronous execution. Each future retrieves its task's result using `get()`, which also waits for completion.
+
+Use `std::async` for relatively coarse independent tasks. For thousands of tiny tasks, a thread pool or parallel algorithm may be more suitable.
+
+## 6. Common parallel algorithms and their complexity
+
+| Algorithm             | Sequential complexity | Parallel opportunity               |
+| --------------------- | --------------------- | ---------------------------------- |
+| Sum / reduction       | \\(O(n)\\)            | Partial reductions                 |
+| Searching             | \\(O(n)\\)            | Search separate chunks             |
+| Merge sort            | \\(O(n\log n)\\)      | Sort halves concurrently           |
+| Matrix multiplication | \\(O(n^3)\\)          | Parallelize rows or tiles          |
+| Prefix sum / scan     | \\(O(n)\\)            | Parallel scan with multiple stages |
+| Histogram             | \\(O(n)\\)            | Local histograms plus merging      |
+
+The actual speedup depends on the number of cores, memory bandwidth, task granularity, synchronization, and the fraction of work that remains sequential.
+
+## 7. Synchronization and common pitfalls
+
+Data races
+
+Two threads accessing the same memory concurrently, with at least one write and without proper synchronization, can cause undefined behavior. Use independent 
+output regions, atomics, or mutexes as appropriate.
+
+Excessive locking
+
+A mutex around every element update can serialize the computation. Prefer thread-local accumulators and combine them after processing.
+
+Too many threads
+
+More threads do not always mean better performance. Tiny tasks may cost less to run sequentially than to schedule concurrently.
+
+Memory bandwidth bottlenecks
+
+Several cores reading and writing large arrays may compete for memory bandwidth, limiting the speedup even when CPU utilization is high.
+
